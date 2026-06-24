@@ -1,0 +1,15 @@
+{
+  "name": "dfin",
+  "owner": {
+    "name": "dfin.pro",
+    "email": "info@dfin.pro",
+    "url": "https://www.dfin.pro"
+  },
+  "plugins": [
+    {
+      "name": "dfin-financial-mcp",
+      "source": "./",
+      "description": "dfin.pro MCP for Fundamental Research: source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, and a fundamentals screener, plus the dfin-research skill."
+    }
+  ]
+}
