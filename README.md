@@ -106,6 +106,8 @@ Once connected, the server exposes its own guidance as MCP resources:
 - `dfin://docs/methodology` - financial-analysis workflow, verification discipline, and citations
 - `dfin://docs/api/v1` - REST developer reference for detailed request and response contracts
 
+When discovering resources, use the `dfin://...` resource URIs directly when your MCP client supports that. If your client requires a server filter before listing resources, use the configured server id shown by that client, or list all resources and select the DFin entries. Do not infer the resource server id from a normalized tool namespace such as `mcp__dfin_pro`, because clients may use different labels for tool namespaces and resource server ids.
+
 ## Links
 
 - Website: [https://www.dfin.pro](https://www.dfin.pro)
