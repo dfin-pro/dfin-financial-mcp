@@ -20,6 +20,8 @@ For agent-readable MCP resources, start with `dfin://docs` for the documentation
 
 Confirm the dfin.pro MCP server is connected and inspect its live tool list and documentation resources before choosing calls. Tool names and schemas can change over time, so treat the connected MCP server and `dfin://docs/mcp/agent-guide` as the source of truth instead of relying on a static list in this skill.
 
+When discovering resources, use the `dfin://...` resource URIs directly when your MCP client supports that. If your client requires a server filter before listing resources, use the configured server id shown by that client, or list all resources and select the DFin entries. Do not infer the resource server id from a normalized tool namespace such as `mcp__dfin_pro`, because clients may use different labels for tool namespaces and resource server ids.
+
 If they are not connected, tell the user to get an API key at https://www.dfin.pro and connect the dfin.pro MCP — a bearer token (`Authorization: Bearer <api_key>`) for Claude Code, Codex, Hermes Agent, or the `https://www.dfin.pro/mcp/<api_key>` URL for clients that cannot send custom headers.
 
 ## Core rules (always)
