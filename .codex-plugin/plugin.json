@@ -1,0 +1,48 @@
+{
+  "name": "dfin-financial-mcp",
+  "version": "0.1.0",
+  "description": "dfin.pro MCP for Fundamental Research - source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, transcripts, reports, and a fundamentals screener for AI agents.",
+  "author": {
+    "name": "dfin.pro",
+    "email": "info@dfin.pro",
+    "url": "https://www.dfin.pro"
+  },
+  "homepage": "https://www.dfin.pro/docs/mcp/",
+  "repository": "https://github.com/dfin-pro/dfin-financial-mcp",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "codex",
+    "financial-data",
+    "sec-filings",
+    "earnings-transcripts",
+    "stock-screener",
+    "fundamental-analysis",
+    "fintech",
+    "llm-tools"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "dfin.pro Financial MCP",
+    "shortDescription": "Source-grounded financial research tools for Codex.",
+    "longDescription": "Connect Codex to the dfin.pro MCP server for source-grounded company research, SEC filings, financial statements, ratios, transcripts, reports, stock context, fund and ETF analytics, and fundamentals screening.",
+    "developerName": "dfin.pro",
+    "category": "Finance",
+    "capabilities": [
+      "Financial research",
+      "SEC filing evidence",
+      "Financial statements and ratios",
+      "Stock screening",
+      "Transcript and report search"
+    ],
+    "websiteURL": "https://www.dfin.pro/docs/mcp/",
+    "brandColor": "#2563EB",
+    "defaultPrompt": [
+      "Research a company using dfin.pro MCP tools.",
+      "Compare peers with source-grounded financial data.",
+      "Find filing, transcript, or report evidence with dfin.pro."
+    ]
+  }
+}
