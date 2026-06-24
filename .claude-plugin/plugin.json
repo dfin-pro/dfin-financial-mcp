@@ -1,0 +1,27 @@
+{
+  "name": "dfin-financial-mcp",
+  "version": "0.1.0",
+  "description": "dfin.pro MCP for Fundamental Research — source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, and a fundamentals screener for AI agents.",
+  "author": {
+    "name": "dfin.pro",
+    "email": "info@dfin.pro",
+    "url": "https://www.dfin.pro"
+  },
+  "homepage": "https://www.dfin.pro",
+  "repository": "https://github.com/dfin-pro/dfin-financial-mcp",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "codex",
+    "hermes agent",
+    "financial-data",
+    "sec-filings",
+    "stock-screener",
+    "fundamental-analysis",
+    "fintech",
+    "llm-tools"
+  ]
+}
