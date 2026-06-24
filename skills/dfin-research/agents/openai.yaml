@@ -1,0 +1,7 @@
+interface:
+  display_name: dfin.pro Research
+  short_description: Source-grounded financial research with dfin.pro MCP tools.
+  brand_color: "#2563EB"
+  default_prompt: Research this company using the dfin.pro MCP tools and cite retrieved evidence.
+policy:
+  allow_implicit_invocation: true
