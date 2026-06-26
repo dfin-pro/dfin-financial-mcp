@@ -31,6 +31,7 @@ If they are not connected, tell the user to get an API key at https://www.dfin.p
 - **Ground every figure in tool results.** Never state a financial number, quote, or date from memory; cite the filing and period, or the statement source.
 - **Verify before presenting.** Recheck figures and calculations, confirm scope (segment vs. consolidated, period, currency, units), and never mix GAAP and non-GAAP figures.
 - **Clarify scope when ambiguous** — company vs. product vs. segment, and fiscal vs. calendar period.
+- **Build screens from the contract.** Always inspect `get_screener_options` before constructing a screen. Do not invent filter names, enum values, sort fields, or output fields from memory.
 
 ## Workflow
 
@@ -39,11 +40,20 @@ If they are not connected, tell the user to get an API key at https://www.dfin.p
    - `search_filings` for source-text evidence — try a few wordings; if a search is empty, broaden terms and relax fiscal filters before concluding the data is unavailable.
    - the financial statement and ratio tools for exact reported numbers. Prefer `source=as_reported` for a single company (it matches how the company filed) and `standardized` when comparing companies (same basis for all); if standardized is missing, fall back to `as_reported`. These cover annual (FY) core statements (income statement, balance sheet, cash flow) for covered companies only — for a quarter, a company they do not cover, or a company-reported KPI or custom metric, use `search_filings` to pull it from the filings (repeat across years for a trend).
    - `get_stock_context` for a single-company overview.
-   - `get_screener_options`, then `run_screener_basic` / `run_screener_advanced`, to find candidates.
+   - the screener workflow below to find candidates.
    - `get_fund_movers` and `get_fund_highlow` for ETF/fund movers and high/low analytics (resolve the fund ticker with `search_securities` first).
 3. **Analyze** — ground claims in results; for comparisons, competition, or M&A, gather evidence from every company involved before concluding.
 4. **Verify** — scope, units and currency, GAAP vs. non-GAAP; recompute derived values.
 5. **Present** — lead with a direct answer, then support it with retrieved data, calculations, and citations.
+
+## Screener workflow
+
+Use `get_screener_options(mode="basic"|"all")` and `run_screener(filters=None, sort=None, page=None, fields=None, result_format="rows")`.
+
+1. Call `get_screener_options()` first. It defaults to `mode="basic"` and returns the compact public screener contract.
+2. If the needed filter is missing, or the task needs growth, historical metric rules, composite metrics, volatility rule groups, or broader public filters, call `get_screener_options(mode="all")` for the full public screener filter contract.
+3. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned contract. Treat top-level `agent_guidance` as workflow guidance, not as a substitute for the contract.
+4. Execute the screen with `run_screener(...)`. If an installed MCP client still exposes old screener runner names, reconnect or reload the MCP/plugin configuration.
 
 ## Presentation style
 
@@ -53,7 +63,7 @@ Be concise, source-grounded, and explicit about uncertainty. Present information
 
 - **Single company** → `search_securities` → `get_stock_context` → statements/ratios → `search_filings` for narrative.
 - **Peer comparison** → resolve each ticker → pull parallel data → comparison table.
-- **Screen for candidates** → `get_screener_options` → `run_screener_basic` / `run_screener_advanced` → research the short list.
+- **Screen for candidates** → `get_screener_options()` or `get_screener_options(mode="all")` → `run_screener(...)` → research the short list.
 - **Filing or earnings question** → `search_filings` with `ticker`, `fiscal_year`, or `filing_type` filters.
 - **Transcript or earnings-call question** → use `search_transcripts` for source-text evidence from earnings-call transcripts.
 - **Existing dfin.pro research or report question** → use `search_reports` first, then `get_report_details` when one report's identifiers, browser URL, or references are needed.
