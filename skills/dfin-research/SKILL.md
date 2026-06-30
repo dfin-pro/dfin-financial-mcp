@@ -1,71 +1,75 @@
 ---
 name: dfin-research
 description: >-
-  Research stocks, funds, and companies with dfin.pro's source-grounded financial data. Use when the user wants to analyze a company, compare peers, pull financial statements, ratios, or stock context, screen stocks on fundamentals, get ETF or fund movers and high/low analytics, or find evidence in SEC filings. Resolves names to tickers via the dfin.pro MCP tools and grounds every figure in retrieved results.
+  Research stocks, funds, and companies with dfin.pro's source-grounded financial data. Use when the user wants to analyze a company, compare peers, pull financial statements, ratios, or stock context, screen stocks on fundamentals, get ETF or fund movers and high/low analytics, find evidence in SEC filings, transcripts, or dfin.pro reports, discover latest transcripts or reports, or explicitly read a full filing, transcript, or report. Resolves names to tickers via the dfin.pro MCP tools and grounds every figure in retrieved results.
 ---
 
 # dfin.pro Research
 
-Answer financial questions with source-grounded data from the dfin.pro MCP: company SEC filings, financial statements, ratios, stock context, fund and ETF analytics, and a fundamentals screener.
+Answer financial questions with source-grounded data from the dfin.pro MCP: securities lookup, company SEC filings, earnings-call transcripts, dfin.pro stock analysis reports, latest transcript/report discovery, explicit full-document retrieval, financial statements, ratios, stock context, fund and ETF analytics, and fundamentals screening.
 
-This skill summarizes dfin.pro's analysis methodology; the full playbook — ticker tiebreakers, search tactics, verification checks, and citations — lives in the `dfin://docs/methodology` resource. The essentials below let you act if the resource is unavailable.
+## Core rules
 
-## Documentation
+- **Read docs before tool use.** Read `dfin://docs/mcp/agent-guide` before choosing tools or constructing parameters for source search, latest browsing, financials/ratios, stock context, funds, or screeners. Do this even when the tool name seems obvious; the guide is the routing and parameter-use authority. Use `dfin://docs/api/v1` only when MCP guidance is insufficient for detailed contracts.
+- **Read methodology before analysis.** For non-trivial financial analysis, read `dfin://docs/methodology` before answering and follow its ticker resolution, evidence, verification, and citation discipline. Do not substitute this skill summary for the methodology resource.
+- **Resolve the ticker first.** Use `search_securities` to turn a company, fund, or ambiguous/bare symbol into an exchange-qualified `ticker.exchange` before calling ticker-specific tools. If several candidates are plausible, ask rather than guess.
+- **Get stock context for company research.** For any company or stock research task, call `get_stock_context` immediately after resolving the ticker and before statements, ratios, filings, transcripts, reports, or other company-specific evidence gathering. This is not required for pure symbol lookup, global latest transcript/report browsing, fund/ETF-only analytics, or raw screen generation.
+- **Ground every figure in retrieved results.** Never state a financial number, quote, date, or hard factual claim from memory. Cite the filing, transcript, report, statement source, or tool result behind it.
+- **Verify before presenting.** Confirm scope, period, currency, units, segment vs. consolidated basis, and GAAP vs. non-GAAP treatment. Recompute derived figures and show the math when useful.
+- **Do not invent parameters.** Use documented tool schemas and returned contracts. Do not guess filter names, enum values, sort fields, output fields, latest/date parameters, or unsupported periods.
+- **Handle beat/miss carefully.** Describe beat, miss, or meet only versus management guidance unless another retrieved source provides a different benchmark.
 
-For human-readable docs, start at https://www.dfin.pro/docs/. Use https://www.dfin.pro/docs/mcp/ for MCP setup and response conventions, https://www.dfin.pro/docs/mcp/agent-guide/ for MCP tool selection, and https://www.dfin.pro/docs/api/v1/ only when detailed REST API contracts are needed.
+## Evidence workflow
 
-For agent-readable MCP resources, start with `dfin://docs` for the documentation map. Use `dfin://docs/mcp/agent-guide` to choose MCP tools, `dfin://docs/mcp` for MCP setup and response conventions, `dfin://docs/methodology` for analysis workflow and verification discipline, and `dfin://docs/api/v1` only when detailed REST API contracts are needed.
+After reading `dfin://docs/mcp/agent-guide`, prefer targeted searches for filings, transcripts, and reports. For company-specific source research, resolve the ticker and call `get_stock_context` before searching.
 
-## Before you start
+- **Filings:** Use `search_filings` for source-text evidence from company filings. Use supported filters such as `ticker`, `fiscal_year`, `fiscal_period`, `filing_type`, `name`, `queries`, `results`, and `searchtype`. Do not use `date_from` or `date_to` with filings, and do not invent a latest-filings tool.
+- **Transcripts:** Use `search_transcripts` for transcript evidence. Use `date_from` / `date_to` only for transcript call-date windows.
+- **Reports:** After company context, use `search_reports` early for company analysis or existing dfin.pro research. Keep searches lean by default; set `include_references=true` only when every returned report needs provenance.
+- **Latest documents:** Use `list_latest_transcripts` and `list_latest_reports` when the user asks for latest/recent transcripts or reports. For recent filings, use `search_filings` with supported filing filters and explain any limitation if recency cannot be narrowed directly.
+- **Report details:** Use `get_report_details` only for one selected report's identifiers, browser URL, and source-reference metadata.
+- **Full document content:** Use `get_document_content` only when the user explicitly asks to read, pull, summarize, review, or analyze a full filing, full transcript, or full report. Otherwise, continue using search results and snippets. After fetching full content, state which document was fetched.
 
-Confirm the dfin.pro MCP server is connected and inspect its live tool list and documentation resources before choosing calls. Tool names and schemas can change over time, so treat the connected MCP server and `dfin://docs/mcp/agent-guide` as the source of truth instead of relying on a static list in this skill.
+If a source search is empty, retry with better search terms before concluding the data is unavailable: vary synonyms, broaden terms, and relax supported fiscal/type filters.
 
-When discovering resources, use the `dfin://...` resource URIs directly when your MCP client supports that. If your client requires a server filter before listing resources, use the configured server id shown by that client, or list all resources and select the DFin entries. Do not infer the resource server id from a normalized tool namespace such as `mcp__dfin_pro`, because clients may use different labels for tool namespaces and resource server ids.
+## Financial data workflow
 
-If they are not connected, tell the user to get an API key at https://www.dfin.pro and connect the dfin.pro MCP — a bearer token (`Authorization: Bearer <api_key>`) for Claude Code, Codex, Hermes Agent, or the `https://www.dfin.pro/mcp/<api_key>` URL for clients that cannot send custom headers.
-
-## Core rules (always)
-
-- **Read the methodology first.** For anything beyond a trivial lookup, read the `dfin://docs/methodology` resource before you start and follow it. The rules below are the essentials and a fallback, not a replacement.
-- **Resolve the ticker first.** Use `search_securities` to turn a company name into an exchange-qualified `ticker.exchange` (for example `MSFT.US`) before calling any ticker tool. If several candidates are plausible, ask rather than guess.
-- **Ground every figure in tool results.** Never state a financial number, quote, or date from memory; cite the filing and period, or the statement source.
-- **Verify before presenting.** Recheck figures and calculations, confirm scope (segment vs. consolidated, period, currency, units), and never mix GAAP and non-GAAP figures.
-- **Clarify scope when ambiguous** — company vs. product vs. segment, and fiscal vs. calendar period.
-- **Build screens from the contract.** Always inspect `get_screener_options` before constructing a screen. Do not invent filter names, enum values, sort fields, or output fields from memory.
-
-## Workflow
-
-1. **Resolve** the company to a ticker with `search_securities`.
-2. **Gather** evidence with the right tool:
-   - `search_filings` for source-text evidence — try a few wordings; if a search is empty, broaden terms and relax fiscal filters before concluding the data is unavailable.
-   - the financial statement and ratio tools for exact reported numbers. Prefer `source=as_reported` for a single company (it matches how the company filed) and `standardized` when comparing companies (same basis for all); if standardized is missing, fall back to `as_reported`. These cover annual (FY) core statements (income statement, balance sheet, cash flow) for covered companies only — for a quarter, a company they do not cover, or a company-reported KPI or custom metric, use `search_filings` to pull it from the filings (repeat across years for a trend).
-   - `get_stock_context` for a single-company overview.
-   - the screener workflow below to find candidates.
-   - `get_fund_movers` and `get_fund_highlow` for ETF/fund movers and high/low analytics (resolve the fund ticker with `search_securities` first).
-3. **Analyze** — ground claims in results; for comparisons, competition, or M&A, gather evidence from every company involved before concluding.
-4. **Verify** — scope, units and currency, GAAP vs. non-GAAP; recompute derived values.
-5. **Present** — lead with a direct answer, then support it with retrieved data, calculations, and citations.
+Read `dfin://docs/mcp/agent-guide` before selecting financial statement, ratio, or stock-context tools and before choosing their parameters. For company or stock research, call `get_stock_context` immediately after resolving the ticker.
+- Use `get_financial_single_statement` for one annual FY statement and `get_financial_stitched_statements` for latest-N annual statement time series.
+- Use `get_financial_ratios` for annual FY ratios.
+- Prefer `source=as_reported` for a single company because it mirrors the issuer's filing; prefer `source=standardized` for comparisons because it normalizes fields across companies.
+- Use `format=field_map` with standardized statements for calculations and direct lookup. Use `format=rows` for issuer-style presentation and whenever `source=as_reported`.
+- Use `include_sources` when statement figures need source traceability.
+- Fall back to source searches when structured tools are out of scope, such as quarterly data, uncovered companies, KPIs, custom metrics, or filing-specific narrative.
 
 ## Screener workflow
 
-Use `get_screener_options(mode="basic"|"all")` and `run_screener(filters=None, sort=None, page=None, fields=None, result_format="rows")`.
+Read the screener guidance before building screens. The examples show patterns; the live screener contract is authoritative.
 
-1. Call `get_screener_options()` first. It defaults to `mode="basic"` and returns the compact public screener contract.
-2. If the needed filter is missing, or the task needs growth, historical metric rules, composite metrics, volatility rule groups, or broader public filters, call `get_screener_options(mode="all")` for the full public screener filter contract.
-3. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned contract. Treat top-level `agent_guidance` as workflow guidance, not as a substitute for the contract.
-4. Execute the screen with `run_screener(...)`. If an installed MCP client still exposes old screener runner names, reconnect or reload the MCP/plugin configuration.
+1. Read `dfin://docs/mcp/agent-guide` before screening.
+2. Call `get_screener_options()` before constructing any screen. It returns the compact basic contract.
+3. If the needed filter is absent, or the task needs growth, historical metric rules, CAGR/multiple rules, composite metrics, volatility rule groups, or broader public filters, call `get_screener_options(mode="all")`.
+4. Read `dfin://docs/examples/screener-starter-screens` for starter screen patterns.
+5. Read `dfin://docs/examples/advanced-growth-filters` before building growth, historical, CAGR, multiple, or multi-year filters.
+6. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned `get_screener_options` contract and relevant examples.
+7. Execute the screen with `run_screener(...)`. Do not use legacy screener runner names.
+
+## Fund workflow
+
+Read `dfin://docs/mcp/agent-guide` before choosing fund tools, deltas, or optional parameters. Resolve fund and ETF tickers with `search_securities` before using fund tools. Use `get_fund_movers` for movers and `get_fund_highlow` for high/low analytics.
 
 ## Presentation style
 
-Be concise, source-grounded, and explicit about uncertainty. Present information like a financial analyst: use tables for quantitative answers where useful, with periods as columns, metrics as rows, and units clearly labeled. Use charts for trends and comparisons when the environment supports them. Separate reported figures from calculations, show the math for derived values, and avoid promotional or overly confident language when retrieved data is incomplete.
+Lead with a direct answer, then support it with retrieved data, calculations, and citations. Use tables for quantitative answers where useful, with periods as columns, metrics as rows, and units clearly labeled. Use charts for trends and comparisons when the environment supports them. Separate reported figures from calculations, show the math for derived values, and be explicit about uncertainty when retrieved data is incomplete.
 
 ## Common requests
 
-- **Single company** → `search_securities` → `get_stock_context` → statements/ratios → `search_filings` for narrative.
-- **Peer comparison** → resolve each ticker → pull parallel data → comparison table.
-- **Screen for candidates** → `get_screener_options()` or `get_screener_options(mode="all")` → `run_screener(...)` → research the short list.
-- **Filing or earnings question** → `search_filings` with `ticker`, `fiscal_year`, or `filing_type` filters.
-- **Transcript or earnings-call question** → use `search_transcripts` for source-text evidence from earnings-call transcripts.
-- **Existing dfin.pro research or report question** → use `search_reports` first, then `get_report_details` when one report's identifiers, browser URL, or references are needed.
-
-When in doubt about how to use a specific tool, read `dfin://docs/mcp/agent-guide`. For non-trivial financial analysis, read `dfin://docs/methodology` before answering.
+- **Single company:** read the agent guide -> `search_securities` -> `get_stock_context` -> statements/ratios -> targeted source searches.
+- **Peer comparison:** read the agent guide and methodology -> resolve each ticker -> `get_stock_context` for each company -> pull parallel structured data -> search source evidence for every company involved -> comparison table.
+- **Screen for candidates:** read the agent guide and screener examples -> `get_screener_options()` or `get_screener_options(mode="all")` -> `run_screener(...)`. Research selected companies only when requested.
+- **Company-specific filing evidence question:** read the agent guide -> `search_securities` -> `get_stock_context` -> `search_filings` with supported filing filters. Do not use filing date filters.
+- **Company-specific transcript or earnings-call question:** read the agent guide -> `search_securities` -> `get_stock_context` -> `search_transcripts`; use `date_from` / `date_to` only for call-date windows.
+- **Company-specific report or existing dfin.pro research question:** read the agent guide -> `search_securities` -> `get_stock_context` -> lean `search_reports`; use `get_report_details` only for one selected report's metadata/references.
+- **Global latest transcript/report request:** read the agent guide -> `list_latest_transcripts` or `list_latest_reports`.
+- **Company-specific latest transcript/report request:** read the agent guide -> `search_securities` -> `get_stock_context` -> `list_latest_transcripts` or `list_latest_reports`.
+- **Full filing/transcript/report request:** read the agent guide -> if company/stock-specific, `search_securities` -> `get_stock_context` -> select the document through search or latest results -> `get_document_content` -> identify the document fetched.
