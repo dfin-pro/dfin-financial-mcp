@@ -23,9 +23,10 @@ Answer financial questions with source-grounded data from the dfin.pro MCP: secu
 
 After reading `dfin://docs/mcp/agent-guide`, prefer targeted searches for filings, transcripts, and reports. For company-specific source research, resolve the ticker and call `get_stock_context` before searching.
 
-- **Filings:** Use `search_filings` for source-text evidence from company filings. Use supported filters such as `ticker`, `fiscal_year`, `fiscal_period`, `filing_type`, `name`, `queries`, `results`, and `searchtype`. Do not use `date_from` or `date_to` with filings, and do not invent a latest-filings tool.
-- **Transcripts:** Use `search_transcripts` for transcript evidence. Use `date_from` / `date_to` only for transcript call-date windows.
-- **Reports:** After company context, use `search_reports` early for company analysis or existing dfin.pro research. Keep searches lean by default; set `include_references=true` only when every returned report needs provenance.
+- **Filings:** Use `search_filings` for source-text evidence from company filings. Use supported filters such as `ticker`, `fiscal_year`, `fiscal_period`, `filing_type`, `name`, `queries`, `results_per_query`, `date_from`, `date_to`, and `searchtype`. 
+- **Transcripts:** Use `search_transcripts` for transcript evidence. Use `date_from` / `date_to` only for transcript `event_date` windows.
+- **Reports:** After company context, use `search_reports` early for company analysis or existing dfin.pro research. Use `date_from` / `date_to` only for report `published_date` windows. Keep searches lean by default; set `include_references=true` only when every returned report needs provenance.
+- **Search result limits:** For `search_filings`, `search_transcripts`, and `search_reports`, use `results_per_query` as a per-query cap. With `N` queries and `results_per_query = R`, the maximum combined result count is `N * R`, though actual returned results may be lower.
 - **Latest documents:** Use `list_latest_transcripts` and `list_latest_reports` when the user asks for latest/recent transcripts or reports. For recent filings, use `search_filings` with supported filing filters and explain any limitation if recency cannot be narrowed directly.
 - **Report details:** Use `get_report_details` only for one selected report's identifiers, browser URL, and source-reference metadata.
 - **Full document content:** Use `get_document_content` only when the user explicitly asks to read, pull, summarize, review, or analyze a full filing, full transcript, or full report. Otherwise, continue using search results and snippets. After fetching full content, state which document was fetched.
@@ -67,8 +68,8 @@ Lead with a direct answer, then support it with retrieved data, calculations, an
 - **Single company:** read the agent guide -> `search_securities` -> `get_stock_context` -> statements/ratios -> targeted source searches.
 - **Peer comparison:** read the agent guide and methodology -> resolve each ticker -> `get_stock_context` for each company -> pull parallel structured data -> search source evidence for every company involved -> comparison table.
 - **Screen for candidates:** read the agent guide and screener examples -> `get_screener_options()` or `get_screener_options(mode="all")` -> `run_screener(...)`. Research selected companies only when requested.
-- **Company-specific filing evidence question:** read the agent guide -> `search_securities` -> `get_stock_context` -> `search_filings` with supported filing filters. Do not use filing date filters.
-- **Company-specific transcript or earnings-call question:** read the agent guide -> `search_securities` -> `get_stock_context` -> `search_transcripts`; use `date_from` / `date_to` only for call-date windows.
+- **Company-specific filing evidence question:** read the agent guide -> `search_securities` -> `get_stock_context` -> `search_filings` with supported filing filters; use `date_from` / `date_to` only for filing-date windows.
+- **Company-specific transcript or earnings-call question:** read the agent guide -> `search_securities` -> `get_stock_context` -> `search_transcripts`; use `date_from` / `date_to` only for `event_date` windows.
 - **Company-specific report or existing dfin.pro research question:** read the agent guide -> `search_securities` -> `get_stock_context` -> lean `search_reports`; use `get_report_details` only for one selected report's metadata/references.
 - **Global latest transcript/report request:** read the agent guide -> `list_latest_transcripts` or `list_latest_reports`.
 - **Company-specific latest transcript/report request:** read the agent guide -> `search_securities` -> `get_stock_context` -> `list_latest_transcripts` or `list_latest_reports`.
