@@ -23,7 +23,7 @@
     "llm-tools"
   ],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "dfin.pro Financial MCP",
     "shortDescription": "Source-grounded financial research tools for Codex.",

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dfin": {
+      "type": "http",
+      "url": "https://www.dfin.pro/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DFIN_API_KEY}"
+      }
+    }
+  }
+}
