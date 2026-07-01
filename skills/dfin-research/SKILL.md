@@ -64,7 +64,7 @@ Lead with a direct answer, then support it with retrieved data, calculations, an
 
 ## Common requests
 
-These flows assume the agent guide has been read per the core rule.
+These flows assume the agent guide has been read per the core rule. You don't need to re-run search_securities or get_stock_context for a company you already resolved or fetched context for earlier.
 
 - **Single company:** `search_securities` -> `get_stock_context` -> statements/ratios -> targeted source searches.
 - **Peer comparison:** resolve each ticker -> `get_stock_context` for each company -> pull parallel structured data -> search source evidence for every company involved -> comparison table.
@@ -74,4 +74,4 @@ These flows assume the agent guide has been read per the core rule.
 - **Company-specific report or existing dfin.pro research question:** `search_securities` -> `get_stock_context` -> lean `search_reports`; use `get_report_details` only for one selected report's metadata/references.
 - **Global latest transcript/report request:** `list_latest_transcripts` or `list_latest_reports`.
 - **Company-specific latest transcript/report request:** `search_securities` -> `get_stock_context` -> `list_latest_transcripts` or `list_latest_reports`.
-- **Full filing/transcript/report request:** if company/stock-specific, `search_securities` -> `get_stock_context` -> select the document through search or latest results -> `get_document_content` -> identify the document fetched.
+- **Full filing/transcript/report request:** if company/stock-specific, `search_securities` -> `get_stock_context` -> select the document through search or latest results -> `get_document_content` -> get the document fetched with the doc_uuid. For greater token efficiency, use chunk_num to browse through the document in smaller chunks. Use the reference chunk_num from search results to navigate forward and backward in the document. 
