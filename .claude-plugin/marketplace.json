@@ -1,9 +1,9 @@
 {
   "name": "dfin",
+  "description": "Plugins for source-grounded fundamental research using the dfin.pro MCP: SEC filings, financial statements, ratios, stock context, fund/ETF analytics, and a fundamentals screener.",
   "owner": {
     "name": "dfin.pro",
-    "email": "info@dfin.pro",
-    "url": "https://www.dfin.pro"
+    "email": "info@dfin.pro"
   },
   "plugins": [
     {
