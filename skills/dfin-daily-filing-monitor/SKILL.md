@@ -12,7 +12,7 @@ Screen recent SEC filings for any topic, then enrich each result with live stock
 ## Requirements
 
 - dfin.pro MCP must be connected (`search_filings`, `get_stock_context`, `get_financial_ratios`)
-- Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing large result sets
+- Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing large result sets and writing the saved dashboard file
 - `show_widget` for the dashboard
 
 The MCP parameters below were verified against the tool schemas. If any call rejects a parameter (API drift), call `agent_help(topic="agent_guide")` to re-check the contract rather than guessing.
@@ -155,7 +155,7 @@ All companies in scope are US-listed (including ADRs), so always use the `.US` s
 Extract the fields below. **`get_stock_context` may return with some fields missing or null** (common for recent listings, thin-coverage names, or ADRs) — this is expected, not an error. For any field that's absent, set the corresponding DATA key to `"—"` (or omit optional keys like `rb`/`rc`) and carry on; never fabricate a value and never abort the company over a missing field.
 
 - **Price & daily change** (`price`, `change`, `change_p`)
-- **Returns**: `WTD`, `MTD`, `YTD` from `todate_returns`; `1y` cumulative from `trailing_returns`
+- **Returns** (the 5 entries in `r`, in order): **Daily** = `change_p`; **WTD**, **MTD**, **YTD** from `todate_returns`; **1Y** = `1y` cumulative from `trailing_returns`
 - **Market cap** (`mkt_cap`)
 - **52-week high/low** (`high_52w`, `low_52w`) + current price for range position
 - **Volume today vs 52-week avg** (`volume`, `vol_avg52w`) → compute ratio
@@ -185,7 +185,7 @@ Extract:
 
 ## Phase 3: Render the Dashboard
 
-The dashboard UI lives in `dashboard.html` in the same directory as this SKILL.md (shown in the `<location>` tag above this skill's content). **Read it once**, then in your `show_widget` call paste that template with `/* INJECT_DATA */` replaced by your DATA object. Do **not** write an intermediate rendered file and read it back — that puts the whole template through context twice for no benefit.
+The dashboard UI lives in `dashboard.html` in the same directory as this SKILL.md (shown in the `<location>` tag above this skill's content — use that absolute path). **Read it once**, then in your `show_widget` call paste that template with `/* INJECT_DATA */` replaced by your DATA object. Do **not** read a saved/rendered `.html` file back into context afterward — you already have the template and DATA, so re-reading just doubles the template's token cost.
 
 ### Step 1 — Build the DATA object
 
@@ -234,11 +234,32 @@ Event pill classes:
 - Personnel: `pill-in` (green, appointment), `pill-out` (red, departure), `pill-promo` (blue, promotion), `pill-board` (purple, board/director), `pill-interim` (gray, interim)
 - Corporate events: `pill-deal` (indigo, M&A / agreements), `pill-debt` (orange, debt / credit / restructuring), `pill-spin` (amber, spin-off / separation), `pill-event` (slate, other material events)
 
-### Step 2 — Inject and render
+### Step 2 — Save, then render
 
-Replace `/* INJECT_DATA */` in the template with your DATA JSON object, then pass the result to `show_widget`.
+Do both in one pass, saving first so a saved copy exists even if the widget fails.
 
-**If rendering fails** — `show_widget` errors, the template can't be read, injection breaks, or the user reports the widget didn't render — don't fail the task. Fall back to **text mode** (see Presenting results) and print the same findings as a concise table so the user still gets the results.
+**1. Save to disk (default).** Write the finished page to the **current working directory** as `filing-monitor-<topic-slug>-<YYYY-MM-DD>.html`, by injecting DATA into the template *on disk* — never echo the injected HTML to stdout or Read the saved file back (either reloads the whole page into context). Skip this step only if the user asked to render in-app without saving (e.g. "just show it, don't save"). Text mode has no HTML, so nothing to save.
+
+```bash
+python - <<'PY'
+import datetime, re, pathlib
+tmpl = pathlib.Path(r"<ABSOLUTE_PATH_TO>/dashboard.html").read_text(encoding="utf-8")   # from the <location> tag
+data = r'''
+<YOUR DATA OBJECT AS VALID JSON>
+'''
+topic = "<topic, e.g. management changes>"
+slug = re.sub(r'[^a-z0-9]+', '-', topic.lower()).strip('-')
+out = pathlib.Path(f"filing-monitor-{slug}-{datetime.date.today()}.html")
+out.write_text(tmpl.replace("/* INJECT_DATA */", data), encoding="utf-8")
+print("Saved", out.resolve())
+PY
+```
+
+This costs only the small DATA payload (the template is read from disk, not context). Exporting later would re-materialize the whole page in context, so always save here rather than after the fact.
+
+**2. Render.** Call `show_widget` with the template (already read once) and `/* INJECT_DATA */` replaced by the same DATA object. Then note the saved path in one line of your summary.
+
+**If rendering fails** — `show_widget` errors, the template can't be read, injection breaks, or the user reports the widget didn't render — don't fail the task. Fall back to **text mode** (see Presenting results) and print the same findings as a concise table. The saved `.html` from step 1, if written, is still valid — point the user to it.
 
 ---
 
@@ -248,7 +269,7 @@ The costly moves are large tool results landing in context. Keep the scan lean:
 
 - **Never read the raw `search_filings` result into context.** It routinely exceeds 100KB and is auto-saved to a file — always distill it with the Phase 1d Python script and read only the distilled output.
 - **Band from first-pass snippets; skip per-ticker "verification" searches by default** (see 1d). Those return full filing chunks and were historically the biggest single cost. Reserve them and `get_document_content` for user-requested deep dives.
-- **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call — no intermediate file, no re-read.
+- **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call. Saving to disk (Phase 3 Step 2) is fine — it injects into the template on disk — but never Read the saved file back or echo its contents to stdout, which would put the whole page through context twice.
 - **Keep the distiller preview short** (≤220 chars/ticker, top ~15) and use the compact short DATA keys as defined — don't add verbose fields.
 - `get_stock_context` and `get_financial_ratios` are one call each per included company; limiting the number of included companies (via sensible banding) is the main lever on their cost.
 
