@@ -9,7 +9,7 @@
     {
       "name": "dfin-financial-mcp",
       "source": "./",
-      "description": "dfin.pro MCP for Fundamental Research: source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, and a fundamentals screener, plus the dfin-research skill."
+      "description": "dfin.pro MCP for Fundamental Research: source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, and a fundamentals screener, plus the dfin-research and dfin-daily-filing-monitor skills."
     }
   ]
 }

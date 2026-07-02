@@ -1,0 +1,235 @@
+<style>
+/* dfin.pro brand palette — signature green + gold accents */
+:root{
+  --dfin-green:#12ce5d;       /* bright brand green — solid accents */
+  --dfin-green-deep:#0f9d49;  /* readable green for text/values on light */
+  --dfin-green-tint:#cae8d7;  /* light green chip background */
+  --dfin-green-ink:#0f7f3d;   /* green text on tint chips */
+  --dfin-gold-ink:#b8890a;    /* dfin gold, darkened for readable text */
+  --dfin-navy:#101923;        /* dfin dark navy */
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:transparent;color:var(--text-primary,#111);padding:16px;font-size:12px}
+.hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:6px}
+.hdr-title{font-size:15px;font-weight:700}
+.hdr-meta{font-size:11px;color:var(--text-tertiary,#888)}
+.chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.chip{background:var(--bg-secondary,#f4f4f4);border-radius:8px;padding:8px 14px;min-width:90px;text-align:center}
+.chip .n{font-size:20px;font-weight:700;line-height:1}
+.chip .l{font-size:10px;color:var(--text-tertiary,#888);margin-top:2px}
+.filters{display:flex;gap:5px;margin-bottom:12px;flex-wrap:wrap}
+.fb{padding:4px 11px;border-radius:20px;border:1px solid var(--border-primary,#ddd);background:transparent;color:var(--text-secondary,#555);font-size:11px;cursor:pointer;transition:all .15s}
+.fb:hover{background:var(--bg-secondary,#f4f4f4)}
+.fb.active{background:var(--text-primary,#111);color:#fff;border-color:var(--text-primary,#111)}
+.cards{display:flex;flex-direction:column;gap:10px}
+.card{background:var(--bg-secondary,#f9f9f9);border:1px solid var(--border-primary,#e8e8e8);border-radius:10px;overflow:hidden}
+.card.hidden{display:none}
+.card-top{padding:12px 14px;display:grid;grid-template-columns:48px 1fr;gap:10px;align-items:start}
+.bdg{width:48px;height:48px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;letter-spacing:.3px;flex-shrink:0;margin-top:2px}
+.co-name{font-weight:600;font-size:13px;margin-bottom:1px}
+.co-sub{font-size:10px;color:var(--text-tertiary,#999);margin-bottom:6px}
+.flagbd{display:inline-block;background:#fef3c7;color:#92400e;font-size:9px;font-weight:600;padding:1px 6px;border-radius:4px;margin-bottom:6px}
+.pill{display:inline-flex;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;white-space:nowrap}
+.pill-in{background:var(--dfin-green-tint);color:var(--dfin-green-ink)}
+.pill-out{background:#fee2e2;color:#991b1b}
+.pill-promo{background:#dbeafe;color:#1e40af}
+.pill-board{background:#ede9fe;color:#5b21b6}
+.pill-spin{background:#fef3c7;color:#92400e}
+.pill-interim{background:#f3f4f6;color:#374151}
+.pill-deal{background:#e0e7ff;color:#3730a3}
+.pill-debt{background:#ffedd5;color:#9a3412}
+.pill-event{background:#e2e8f0;color:#334155}
+.ev-rows{display:flex;flex-direction:column;gap:3px}
+.ev-row{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:var(--text-secondary,#444);line-height:1.4}
+.ev-row strong{color:var(--text-primary,#111)}
+.dvdr{height:1px;background:var(--border-primary,#e8e8e8);margin:0 14px}
+.stock-row{padding:10px 14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.price-block{min-width:90px}
+.price{font-size:17px;font-weight:700;line-height:1}
+.pc{font-size:11px;margin-top:2px;font-weight:500}
+.pos{color:var(--dfin-green-deep)}.neg{color:#b91c1c}
+.ret-tbl{display:flex;gap:3px}
+.ret-c{text-align:center;padding:3px 6px;border-radius:5px;min-width:44px}
+.rl{font-size:9px;color:var(--text-tertiary,#999);margin-bottom:1px;text-transform:uppercase;letter-spacing:.3px}
+.rv{font-size:11px;font-weight:600}
+.rp{background:var(--dfin-green-tint);color:var(--dfin-green-ink)}
+.rn{background:#fee2e2;color:#b91c1c}
+.rz{background:var(--bg-secondary,#f4f4f4);color:var(--text-secondary,#555)}
+.rng-blk{flex:1;min-width:120px;max-width:180px}
+.rng-lbl{font-size:9px;color:var(--text-tertiary,#999);display:flex;justify-content:space-between;margin-bottom:4px}
+.rng-bar{height:4px;background:var(--border-primary,#ddd);border-radius:2px;position:relative;margin:4px 0}
+.rng-mrk{position:absolute;top:-4px;width:12px;height:12px;border-radius:50%;background:var(--text-primary,#111);border:2px solid #fff;transform:translateX(-50%)}
+.rng-bd{font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;white-space:nowrap}
+.badge-low{background:#fee2e2;color:#b91c1c}
+.badge-high{background:var(--dfin-green-tint);color:var(--dfin-green-ink)}
+.vol-blk{text-align:center;min-width:70px}
+.vol-n{font-size:12px;font-weight:600}
+.vol-l{font-size:9px;color:var(--text-tertiary,#999)}
+.vol-hi{color:var(--dfin-gold-ink)}
+.fund-row{padding:8px 14px 10px;display:flex;align-items:center;flex-wrap:wrap}
+.fi{padding:0 10px;border-right:1px solid var(--border-primary,#e0e0e0);text-align:center}
+.fi:first-child{padding-left:0}
+.fi .fl{font-size:9px;color:var(--text-tertiary,#999);text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px}
+.fi .fv{font-size:12px;font-weight:600}
+.eps-blk{padding:0 10px;text-align:center;border-right:1px solid var(--border-primary,#e0e0e0)}
+.eps-dots{display:flex;gap:3px;justify-content:center;margin-top:2px}
+.eps-dot{width:10px;height:10px;border-radius:50%}
+.ep-b{background:var(--dfin-green)}.ep-m{background:#dc2626}.ep-z{background:#9ca3af}
+.file-blk{margin-left:auto;display:flex;align-items:center;gap:8px;padding-left:10px}
+.file-dt{font-size:10px;color:var(--text-tertiary,#999)}
+.sec-lnk{font-size:10px;color:var(--text-secondary,#555);text-decoration:none;border:1px solid var(--border-primary,#ddd);padding:2px 7px;border-radius:4px}
+.sec-lnk:hover{background:var(--bg-secondary,#f4f4f4)}
+details{border-top:1px solid var(--border-primary,#e8e8e8)}
+details summary{padding:7px 14px;font-size:11px;font-weight:600;color:var(--text-secondary,#555);cursor:pointer;list-style:none;display:flex;align-items:center;gap:5px;user-select:none}
+details summary::before{content:'▶';font-size:8px;transition:transform .2s;display:inline-block}
+details[open] summary::before{transform:rotate(90deg)}
+details summary::-webkit-details-marker{display:none}
+.desc{padding:8px 14px 12px;font-size:11px;color:var(--text-secondary,#555);line-height:1.6;border-top:1px solid var(--border-primary,#eee)}
+</style>
+
+<div id="root"></div>
+
+<script>
+const DATA = /* INJECT_DATA */;
+
+const RL = ['Daily','WTD','MTD','YTD','1Y'];
+
+function num(x) { return typeof x === 'number' && isFinite(x); }
+function esc(x) {
+  return String(x == null ? '' : x).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderCard(co) {
+  co = co || {};
+  const hasRange = num(co.lo) && num(co.hi) && num(co.cur) && co.hi > co.lo;
+  const rp = hasRange
+    ? Math.min(100, Math.max(0, ((co.cur - co.lo) / (co.hi - co.lo)) * 100)).toFixed(1)
+    : null;
+
+  const flagbadge = co.flag
+    ? `<div class="flagbd">⚑ ${esc(co.flagnote || 'Flagged — verify relevance')}</div>`
+    : '';
+
+  const evs = (co.ev || []).map(row => {
+    const [cls, lbl, person, detail] = row || [];
+    return `<div class="ev-row"><span class="pill ${esc(cls)}">${esc(lbl)}</span><span><strong>${esc(person)}</strong> — ${esc(detail)}</span></div>`;
+  }).join('');
+
+  const rets = (co.r || []).map((row, i) => {
+    const [v, pos] = row || [];
+    const c = v === 0 ? 'rz' : pos ? 'rp' : 'rn';
+    const f = v === 0 ? '0.0%' : `${pos ? '+' : ''}${Math.abs(num(v) ? v : 0).toFixed(1)}%`;
+    return `<div class="ret-c ${c}"><div class="rl">${RL[i] || ''}</div><div class="rv">${f}</div></div>`;
+  }).join('');
+
+  const eps = (co.eps || []).map(row => {
+    const [b, t] = row || [];
+    return `<div class="eps-dot ${b === 1 ? 'ep-b' : b === 0 ? 'ep-m' : 'ep-z'}" title="${esc(t)}"></div>`;
+  }).join('');
+
+  const rbadge = co.rb
+    ? `<span class="rng-bd ${esc(co.rc)}">${esc(co.rb)}</span>`
+    : hasRange
+      ? `<span style="font-size:9px;color:#888">${rp}% of 52W range</span>`
+      : '';
+
+  const rngBlock = hasRange
+    ? `<div class="rng-blk">
+      <div class="rng-lbl"><span>$${co.lo.toFixed(2)}</span><span>$${co.hi.toFixed(2)}</span></div>
+      <div class="rng-bar"><div class="rng-mrk" style="left:${rp}%"></div></div>
+      <div style="margin-top:4px">${rbadge}</div>
+    </div>`
+    : `<div class="rng-blk"><div class="rng-lbl"><span>52W range</span><span>—</span></div></div>`;
+
+  return `
+<div class="card" data-tags="${esc(co.tags || '')}">
+  <div class="card-top">
+    <div class="bdg" style="background:${esc(co.bg || 'var(--bg-secondary,#eee)')};color:${esc(co.fg || 'var(--text-primary,#111)')}">${esc(co.t)}</div>
+    <div>
+      <div class="co-name">${esc(co.n)}</div>
+      <div class="co-sub">${esc(co.s)}</div>
+      ${flagbadge}
+      <div class="ev-rows">${evs}</div>
+    </div>
+  </div>
+  <div class="dvdr"></div>
+  <div class="stock-row">
+    <div class="price-block">
+      <div class="price">${esc(co.p || '—')}</div>
+      <div class="pc ${co.pp ? 'pos' : 'neg'}">${esc(co.pc || '')}</div>
+      <div style="font-size:9px;color:#888;margin-top:3px">Mkt Cap ${esc(co.mc || '—')} · β ${esc(co.b || '—')}</div>
+    </div>
+    <div class="ret-tbl">${rets}</div>
+    ${rngBlock}
+    <div class="vol-blk">
+      <div class="vol-n ${co.vh ? 'vol-hi' : ''}">${esc(co.v || '—')}</div>
+      <div class="vol-l">${co.vr ? esc(co.vr) + ' avg vol' : ''}</div>
+    </div>
+  </div>
+  <div class="dvdr"></div>
+  <div class="fund-row">
+    <div class="fi"><div class="fl">ROE</div><div class="fv">${esc(co.roe || '—')}</div></div>
+    <div class="fi"><div class="fl">ROIC</div><div class="fv">${esc(co.roic || '—')}</div></div>
+    <div class="fi"><div class="fl">ND/EBITDA</div><div class="fv">${esc(co.nd || '—')}</div></div>
+    <div class="fi"><div class="fl">EBITDA Mgn</div><div class="fv">${esc(co.em || '—')}</div></div>
+    <div class="fi"><div class="fl">Fwd P/E</div><div class="fv">${esc(co.pe || '—')}</div></div>
+    <div class="eps-blk">
+      <div class="fl">EPS vs Est (4Q)</div>
+      <div class="eps-dots">${eps}</div>
+    </div>
+    <div class="file-blk">
+      <span class="file-dt">Filed ${esc(co.fd || '—')}</span>
+      <a class="sec-lnk" href="${esc(co.fl || '#')}" target="_blank">SEC ↗</a>
+    </div>
+  </div>
+  <details>
+    <summary>About ${esc(co.n)}</summary>
+    <div class="desc">${esc(co.d || 'No description available.')}</div>
+  </details>
+</div>`;
+}
+
+function render() {
+  const D = (typeof DATA === 'object' && DATA) ? DATA : {};
+  const title = esc(D.title || 'Filing Monitor');
+  const range = esc(D.range || '');
+  const ftype = esc(D.ftype || '8-K');
+  const stats = Array.isArray(D.stats) ? D.stats : [];
+  const filters = Array.isArray(D.filters) ? D.filters : [];
+  const cos = Array.isArray(D.cos) ? D.cos : [];
+
+  const body = cos.length
+    ? `<div class="cards">${cos.map(renderCard).join('')}</div>`
+    : `<div style="padding:24px 4px;color:var(--text-tertiary,#888);font-size:12px">No companies matched. Try a broader topic or a wider date range.</div>`;
+
+  document.getElementById('root').innerHTML =
+    `<div class="hdr"><div><div class="hdr-title">${title}</div>` +
+    `<div class="hdr-meta">${ftype} filings · ${range} · SEC EDGAR</div></div></div>` +
+    `<div class="chips">${stats.map(row => {
+      const [n, l] = row || [];
+      return `<div class="chip"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
+    }).join('')}</div>` +
+    `<div class="filters">${filters.map((row, i) => {
+      const [id, lbl] = row || [];
+      return `<button class="fb${i === 0 ? ' active' : ''}" onclick="filter('${esc(id)}',this)">${esc(lbl)}</button>`;
+    }).join('')}</div>` +
+    body;
+}
+
+function filter(tag, btn) {
+  document.querySelectorAll('.fb').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.card').forEach(card => {
+    const tags = (card.dataset.tags || '').split(' ');
+    card.classList.toggle('hidden', tag !== 'all' && !tags.includes(tag));
+  });
+}
+
+try {
+  render();
+} catch (e) {
+  document.getElementById('root').innerHTML =
+    `<div style="padding:24px 4px;color:#b91c1c;font-size:12px">Could not render the dashboard (${esc(e && e.message)}). The underlying data may be malformed.</div>`;
+}
+</script>
