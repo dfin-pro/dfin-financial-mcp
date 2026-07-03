@@ -11,7 +11,7 @@ Screen recent SEC filings for any topic, then enrich each result with live stock
 
 ## Requirements
 
-- dfin.pro MCP must be connected (`search_filings`, `get_stock_context`, `get_financial_ratios`)
+- dfin.pro MCP must be connected (`search_filings`, `get_stock_context`, `get_financial_ratios`; plus `search_in_documents` / `get_document_content` for the light second look in 1d)
 - Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing large result sets and writing the saved dashboard file
 - `show_widget` for the dashboard
 
@@ -94,11 +94,15 @@ data = json.load(sys.stdin)
 results = data.get('result') or data.get('results') or []
 
 best = {}
+uuids = {}
 for r in results:
     if not isinstance(r, dict):
         continue
     ticker = r.get('ticker', '')
     score = r.get('reranking_score', 0)
+    du = r.get('doc_uuid', '')
+    if du and du not in uuids.setdefault(ticker, []):
+        uuids[ticker].append(du)   # every distinct doc (cover + returned exhibits) for this ticker
     if ticker not in best or score > best[ticker]['score']:
         best[ticker] = {
             'ticker': ticker,
@@ -107,16 +111,19 @@ for r in results:
             'date': r.get('filing_date', ''),
             'filing_type': r.get('filing_type', ''),
             'uri': r.get('meta_data', {}).get('source_uri', ''),
+            'chunks': r.get('meta_data', {}).get('total_chunks', ''),
             'content': r.get('content', '')[:220]
         }
 
 ranked = [v for v in sorted(best.values(), key=lambda x: -x['score']) if v['score'] > 0.01]
 print(f'{len(ranked)} tickers above threshold (showing top 15)')
 for v in ranked[:15]:
+    du_str = ', '.join(uuids.get(v['ticker'], []))
     print('---')
     print(f'Score: {v[\"score\"]:.4f} | {v[\"ticker\"]} | {v[\"name\"]}')
     print(f'Filed: {v[\"date\"]} | {v[\"filing_type\"][:60]}')
     print(f'URI: {v[\"uri\"][:120]}')
+    print(f'doc_uuids: {du_str} | chunks(best): {v[\"chunks\"]}')
     print(f'Content: {v[\"content\"]}')
     print()
 "
@@ -124,17 +131,27 @@ for v in ranked[:15]:
 
 Keep the preview short (≤220 chars) — it is only used to band each name below, not to reproduce the filing.
 
-Band each ticker from the first-pass snippet alone — **do not run extra per-ticker searches to "verify"** (that pulls full filing chunks into context and is the single biggest token cost). Judge relevance, don't over-judge: when in doubt, include and flag rather than exclude, and let the user decide.
+Band each name from its first-pass snippet. Don't verify every name with extra searches — that pulls full chunks into context and is the biggest token cost. The one exception is **cover-page-only** names, handled below. Judge relevance, don't over-judge: when in doubt, include and flag rather than exclude.
 
 Three bands:
 
 - **Confirmed** — the snippet clearly shows the event: for management changes, a named person plus appoint / resign / depart / promote language, or an explicit "Item 5.02 … appointment/departure" naming a person. Include; tag `confirmed`; `flag: false`.
-- **Flagged** — positive score but the snippet is inconclusive: cover-page only, or generic boilerplate (bylaws officer sections, credit-agreement "Administrative Agent may resign", agency/dealer agreements). **Include it anyway**, tag `flagged`, set `flag: true`, and give a short `flagnote` saying why (e.g. "cover page only — may be a bylaws amendment"). This surfaces high-scoring names the user may want without you silently dropping them.
-- **Excluded** — only when the snippet is clearly an unrelated topic, or `reranking_score` ≤ ~0.02.
+- **Flagged** — positive score but the snippet is inconclusive after the light second look below (still no substantive event text). **Include it anyway**, tag `flagged`, set `flag: true`, and give a short `flagnote` saying why (e.g. "8-K carries only a press-release exhibit; subject not in retrieved text"). This surfaces plausible names without silently dropping them.
+- **Excluded** — the snippet is clearly an unrelated topic (e.g. a credit-agreement "Administrative Agent may resign", an agency/dealer agreement), or `reranking_score` ≤ ~0.02.
+
+**Light second look (cover-page-only names).** When a name's best snippet is just the 8-K cover / front matter — registrant header, checkboxes, an "Item X.XX" heading with no substance, or a bare exhibit fragment — the first pass tells you nothing about the actual event. For these (and only these), take **one** cheap look before finalizing the band, so cards say something useful. Keep it lean:
+
+- Cap it to the top ~3–5 cover-page-only names by score that are plausibly on-topic and filed in the window. Skip clear off-topic names (band them Excluded straight away).
+- Take **one** scoped follow-up per name — never an open-ended search. Pick the tighter tool:
+  - **`search_in_documents`** (default, cheapest) — search inside that ticker's filing bundle using the **full `doc_uuids` list** the distiller prints for it (covers the main 8-K plus any exhibits that came back in the first pass): `search_in_documents(doc_uuids=[<all doc_uuids for the ticker>], queries=["<one tight topic query>"], results_per_query=3)`. Jumps straight to the event text.
+  - **Strict ticker + date `search_filings`** — the fallback when `search_in_documents` still finds only front matter, i.e. the substance sits in an exhibit that never surfaced in the first pass (so the distiller has no `doc_uuid` for it): `search_filings(ticker="<TICKER>.US", date_from="<filing date>", date_to="<filing date>", queries=["<one tight query>"], results_per_query=3)`. The exact-date bound scopes it to that day's filing bundle instead of the ticker's whole history — **never run a ticker search without a date bound.**
+  - (To read a specific chunk you already know the location of, `get_document_content(doc_uuid, chunk_num)` works too, but the scoped searches above find the substance for you.)
+- Reclassify from the result: event now clear → **Confirmed** with a real one-line summary; still murky → keep **Flagged** with a sharper `flagnote`.
+- Stop as soon as you can classify — don't read whole documents or run all five queries here.
 
 The dashboard renders flagged cards with an amber "⚑" badge and a `Flagged` filter, so confirmed and doubtful names are visually separated but both present.
 
-**Optional deep dive (only if the user asks about a specific company)** — re-run `search_filings` scoped to that name: `ticker="<TICKER>.US"` (use the exchange-qualified form — the bare symbol returns no results), same `queries`, higher `results_per_query`; or `get_document_content` (via `doc_uuid` + `chunk_num`) to read the actual disclosure. Both are token-heavy, so reserve them for on-demand drill-downs, not the default scan.
+**Full deep dive (only if the user asks about a specific company)** — go beyond the light look: run `search_in_documents` over that ticker's full `doc_uuids` list with the full `queries` set and a higher `results_per_query`; or a strict ticker + date `search_filings` (still date-bounded to the filing day) to sweep every co-filed exhibit; or browse the whole filing via `get_document_content` across multiple `chunk_num`s. Token-heavy, so reserve it for user-requested drill-downs.
 
 ---
 
@@ -210,14 +227,14 @@ Per-company schema (use these exact short keys):
 | `flag` | `true` for a Flagged (doubtful) name — renders an amber "⚑" badge. Omit or `false` for Confirmed. |
 | `flagnote` | Short reason shown in the badge when `flag` is true, e.g. `"cover page only — may be a bylaws amendment"`. |
 | `n` | Full company name |
-| `s` | `"EXCHANGE · Sector"` |
+| `s` | `"EXCHANGE · Sector"` e.g. `"NYSE · Apparel Retail"` — sector from `GicSector`/`GicSubIndustry`; exchange from the filing's Section 12(b) registration line, or just show the sector if the exchange isn't clear. |
 | `mc` | Market cap string e.g. `"$30.3B"` |
 | `b` | Beta string e.g. `"1.00"` |
 | `ev` | Events: `[["pill-class", "LABEL", "Subject", "detail text"], ...]`. For personnel events the subject is the person's name; for non-personnel events (M&A, debt, etc.) use the subject of the event (counterparty, facility, plan) — it renders as `**Subject** — detail`. |
 | `p` | Price string e.g. `"$28.79"` |
 | `pc` | Change string e.g. `"+$0.60 (+2.13%)"` |
 | `pp` | `true` if change is positive |
-| `r` | Returns: `[[value, is_positive], ...]` — 5 entries: Daily, WTD, MTD, YTD, 1Y |
+| `r` | Returns: `[[value, is_positive], ...]` — 5 entries in order: Daily, WTD, MTD, YTD, 1Y. Values are numbers (percent). If the whole set is unavailable (e.g. a just-listed name), pass `[]` (the row renders blank) rather than zeros, which would show a misleading "0.0%". |
 | `lo` / `hi` / `cur` | 52w low, 52w high, current price (numbers) |
 | `rb` | Range badge text e.g. `"↓ Near 52W Low"` or `"★ 52W High"` — omit if neither |
 | `rc` | Range badge class: `"badge-low"` or `"badge-high"` |
@@ -268,7 +285,7 @@ This costs only the small DATA payload (the template is read from disk, not cont
 The costly moves are large tool results landing in context. Keep the scan lean:
 
 - **Never read the raw `search_filings` result into context.** It routinely exceeds 100KB and is auto-saved to a file — always distill it with the Phase 1d Python script and read only the distilled output.
-- **Band from first-pass snippets; skip per-ticker "verification" searches by default** (see 1d). Those return full filing chunks and were historically the biggest single cost. Reserve them and `get_document_content` for user-requested deep dives.
+- **Band from first-pass snippets; don't verify every name** (see 1d). Per-ticker searches return full chunks and are the biggest single cost. The one sanctioned exception is the capped "light second look" for cover-page-only names (top ~3–5, one follow-up each); the full multi-query / whole-document drill-down stays user-requested.
 - **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call. Saving to disk (Phase 3 Step 2) is fine — it injects into the template on disk — but never Read the saved file back or echo its contents to stdout, which would put the whole page through context twice.
 - **Keep the distiller preview short** (≤220 chars/ticker, top ~15) and use the compact short DATA keys as defined — don't add verbose fields.
 - `get_stock_context` and `get_financial_ratios` are one call each per included company; limiting the number of included companies (via sensible banding) is the main lever on their cost.
