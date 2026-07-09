@@ -12,7 +12,7 @@ Screen recent SEC filings for any topic, then enrich each result with live stock
 ## Requirements
 
 - dfin.pro MCP must be connected (`search_filings`, `get_stock_context`, `get_financial_ratios`; plus `search_in_documents` / `get_document_content` for the light second look in 1d)
-- Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing large result sets and writing the saved dashboard file
+- Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing result sets and writing the saved dashboard file
 - `show_widget` for the dashboard
 
 The MCP parameters below were verified against the tool schemas. If any call rejects a parameter (API drift), call `agent_help(topic="agent_guide")` to re-check the contract rather than guessing.
@@ -85,13 +85,37 @@ results_per_query: 20
 
 ### 1d. Parse and filter results
 
-Results often exceed 100KB and get saved to a file. Parse with bash + Python, using whichever interpreter is available on this machine (`python3`, `python`, or `py -3` — on Windows `python3` is often absent):
+The `search_filings` result arrives **one of two ways, chosen by size, not by you** — handle them differently, on purpose, to stay token-efficient:
+
+- **Inline** — the JSON is already in the tool response and in your context. Read the array directly and band from it. The array may be wrapped under a `result` (or `results`) key, or be a bare list — take the list whichever way it comes. Do **not** write it to a scratch file or echo it just to re-run it through Python: that re-emits the whole array for no gain, since it's already delivered. Even a *largish* inline array (anything under the spill threshold) is fine to band directly — it's already in context, so those tokens are spent regardless. Just don't paste the raw array back into your reply.
+- **Saved file** (large, roughly >100KB) — spilled to disk; the tool message gives you a `<result-file-path>`. **Never read that file into context.** Distill it with the pipe below and read only the distilled output.
+
+The Python distiller below is for the **saved-file path only**, using whichever interpreter is available on this machine (`python3`, `python`, or `py -3` — on Windows `python3` is often absent). Its `normalize()` step handles the same wrapper-vs-bare-list variants you unwrap by eye on the inline path (the string / `{"text": …}` cases are defensive future-proofing against the server's wrapper changing):
 
 ```bash
 cat "<result-file-path>" | python -c "
 import json, sys
-data = json.load(sys.stdin)
-results = data.get('result') or data.get('results') or []
+payload = json.loads(sys.stdin.read())
+
+def normalize(x):
+    # dict-wrapped ({'result'/'results': [...]}, FastMCP auto-wrap) OR bare list.
+    if isinstance(x, dict):
+        x = x.get('result') or x.get('results') or []
+    if not isinstance(x, list):
+        return []
+    out = []
+    for r in x:
+        if isinstance(r, str):                          # element is a JSON string
+            try: r = json.loads(r)
+            except Exception: continue
+        if isinstance(r, dict) and set(r) == {'text'}:  # {'text': '<json string>'} wrapper
+            try: r = json.loads(r['text'])
+            except Exception: continue
+        if isinstance(r, dict):
+            out.append(r)
+    return out
+
+results = normalize(payload)
 
 best = {}
 uuids = {}
@@ -284,7 +308,7 @@ This costs only the small DATA payload (the template is read from disk, not cont
 
 The costly moves are large tool results landing in context. Keep the scan lean:
 
-- **Never read the raw `search_filings` result into context.** It routinely exceeds 100KB and is auto-saved to a file — always distill it with the Phase 1d Python script and read only the distilled output.
+- **Never dump the raw `search_filings` result into your reply.** Large results are auto-saved to a file — distill from the path with the Phase 1d Python script and read only the distilled output; never read the file into context. Smaller results come back inline (already in context, already small) — band directly from them, no Python round-trip needed. Either way, don't paste the raw array back into your reply.
 - **Band from first-pass snippets; don't verify every name** (see 1d). Per-ticker searches return full chunks and are the biggest single cost. The one sanctioned exception is the capped "light second look" for cover-page-only names (top ~3–5, one follow-up each); the full multi-query / whole-document drill-down stays user-requested.
 - **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call. Saving to disk (Phase 3 Step 2) is fine — it injects into the template on disk — but never Read the saved file back or echo its contents to stdout, which would put the whole page through context twice.
 - **Keep the distiller preview short** (≤220 chars/ticker, top ~15) and use the compact short DATA keys as defined — don't add verbose fields.
