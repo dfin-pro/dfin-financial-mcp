@@ -1,4 +1,9 @@
 
+---
+name: dfin-screener
+description: Build and run dfin.pro stock screens. Use when the user wants to find, filter, sort, or rank public companies using financial, valuation, growth, technical, or other screener criteria.
+---
+
 ## Screener workflow
 
 Read the screener guidance before building screens. The examples show patterns; the live screener contract is authoritative.
