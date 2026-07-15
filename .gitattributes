@@ -1,0 +1,3 @@
+# Repository blobs are already LF-normalized. Pin this explicitly so a clone
+# with core.autocrlf=false cannot commit CRLF back into a SKILL.md.
+* text=auto eol=lf
