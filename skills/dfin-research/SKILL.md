@@ -27,23 +27,22 @@ Prefer targeted searches for filings, transcripts, and reports. For company-spec
   * Use supported filters such as `ticker`, `fiscal_year`, `fiscal_period`, `filing_type`, `queries`, `results_per_query`, `date_from`, `date_to`, and `searchtype`. 
   * It is **strongly recommended** to use at least 2 filters to improve the search performance. Open ended searches without any filters or just one filter (e.g. just a ticker or just a filing_type) will take a long time to generate a result and may result in response code of 202 (pending). Using bounding dates, or filing_type with the ticker will dramatically improve time to generate a response.
   * If a source search is empty, retry with better search terms before concluding the data is unavailable: vary synonyms, broaden terms, and relax supported fiscal/type filters.
+  * For recency-based browsing rather than evidence search — latest filings, last N filings, filings in the last N days — use `list_latest_filings` instead.
 - **Transcripts:** Use `search_transcripts` for transcript evidence. Use `date_from` / `date_to` only for transcript `event_date` windows.
 - **Reports:** After company context, use `search_reports` early for company analysis or existing dfin.pro research. Use `date_from` / `date_to` only for report `published_date` windows. Keep searches lean by default; set `include_references=true` only when every returned report needs provenance.
 - **User Notes:** Use `search_notes` for any prior user created notes. You can use these notes to help speed up research or incorporate these findings to inform further analysis. 
 - **Search result limits:** For `search_filings`, `search_transcripts`, and `search_reports`, use `results_per_query` as a per-query cap. With `N` queries and `results_per_query = R`, the maximum combined result count is `N * R`, though actual returned results may be lower.
-- **Latest documents:** Use `list_latest_transcripts` and `list_latest_reports` when the user asks for latest/recent transcripts or reports. For recent filings, use `search_filings` with supported filing filters and explain any limitation if recency cannot be narrowed directly.
+- **Latest documents:** Use `list_latest_filings`, `list_latest_transcripts`, and `list_latest_reports` when the user asks for latest/recent documents or documents from the last N days. Use `search_filings` instead for natural-language evidence search.
 - **Report details:** Use `get_report_details` only for one selected report's identifiers, browser URL, and source-reference metadata.
 - **Full document content:** Use `get_document_content` only when the user explicitly asks to read, pull, summarize, review, or analyze a full filing, full transcript, or full report. Otherwise, continue using search results and snippets. After fetching full content, state which document was fetched.
 - **Broad questions still start in DFin.** If the user asks an industry/sector-specific question after discussing a public company, first use DFin for the subject company and relevant public peers. Broad filing search can be done without resolving ticker names, but these could take time produce a lot of noise. Better plan is to to find and resolve peers with `search_securities`. Ask a user for peers/comparable companies if you do not know any, then use `search_filings`, `search_transcripts`, `search_reports`, `search_notes`, or structured financial tools as appropriate. Only browse the web for context that DFin does not cover.
-
-If a source search is empty, retry with better search terms before concluding the data is unavailable: vary synonyms, broaden terms, and relax supported fiscal/type filters.
 
 ## Financial data workflow
 
 For company or stock research, call `get_stock_context` immediately after resolving the ticker.
 - Use `get_financial_single_statement` for one annual FY statement and `get_financial_stitched_statements` for latest-N annual statement time series.
 - Use `get_financial_ratios` for annual FY ratios.
-- Prefer `source=as_reported` for a single company because it mirrors the issuer's filing; prefer `source=standardized` for comparisons because it normalizes fields across companies.
+- Prefer `source=as_reported` for a single company because it mirrors the issuer's filing; prefer `source=standardized` for comparison across companies because it normalizes fields.
 - Use `format=field_map` with standardized statements for calculations and direct lookup. Use `format=rows` for issuer-style presentation and whenever `source=as_reported`.
 - Use `include_sources` when statement figures need source traceability.
 - Fall back to source searches when structured tools are out of scope, such as quarterly data, uncovered companies, KPIs, custom metrics, or filing-specific narrative.
@@ -71,6 +70,6 @@ These flows assume the agent guide has been read per the core rule. You don't ne
 - **Company-specific transcript or earnings-call question:** `search_securities` -> `get_stock_context` -> `search_transcripts`; use `date_from` / `date_to` only for `event_date` windows.
 - **Company-specific report or existing dfin.pro research question:** `search_securities` -> `get_stock_context` -> lean `search_reports`; use `get_report_details` only for one selected report's metadata/references.
 - **Price or chart request:** `search_securities` -> `get_stock_context` -> `get_price`
-- **Global latest transcript/report request:** `list_latest_transcripts` or `list_latest_reports`.
-- **Company-specific latest transcript/report request:** `search_securities` -> `get_stock_context` -> `list_latest_transcripts` or `list_latest_reports`.
+- **Global latest filing/transcript/report request:** `list_latest_filings`, `list_latest_transcripts`, or `list_latest_reports`.
+- **Company-specific latest filing/transcript/report request:** `search_securities` -> `get_stock_context` -> `list_latest_filings`, `list_latest_transcripts`, or `list_latest_reports`.
 - **Full filing/transcript/report request:** if company/stock-specific, `search_securities` -> `get_stock_context` -> select the document through search or latest results -> `get_document_content` -> get the document fetched with the doc_uuid. For greater token efficiency, use chunk_num to browse through the document in smaller chunks. Use the reference chunk_num from search results to navigate forward and backward in the document. 
