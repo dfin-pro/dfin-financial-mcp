@@ -183,13 +183,16 @@ The dashboard renders flagged cards with an amber "⚑" badge and a `Flagged` fi
 
 For each company that passes the filter, make two parallel calls:
 
-**Text mode shortcut:** if the user asked for text output (no dashboard), you only need latest price, daily change, and the 1Y return — so call `get_stock_context` and **skip `get_financial_ratios`** (ratios, EPS dots, and description aren't shown in the text table). This saves one call per company.
+**Text mode shortcut:** if the user asked for text output (no dashboard), you only need latest price, daily change, and the 1Y return — so narrow the call to `fields: ["price", "returns"]` and **skip `get_financial_ratios`** entirely (ratios, EPS dots, and description aren't shown in the text table). That saves one call per company and shrinks the other one.
 
 ### 2a. get_stock_context
 
 ```
 ticker: "<TICKER>.US"
+fields: ["price", "returns", "fundamentals.technicals", "fundamentals.description", "fundamentals.earnings_history"]
 ```
+
+**Always pass `fields`.** It returns every section by default, and those five are the only ones this skill reads. Omitting it also drags in executives, earnings estimates, database coverage counts, and note counts — on every company, once per company. That is the largest avoidable cost in the scan.
 
 All companies in scope are US-listed (including ADRs), so always use the `.US` suffix. If the ticker doesn't resolve, run `search_securities` to confirm the correct `.US` symbol before retrying.
 
@@ -202,8 +205,8 @@ Extract the fields below. **`get_stock_context` may return with some fields miss
 - **Volume today vs 52-week avg** (`volume`, `vol_avg52w`) → compute ratio
 - **Beta** (`Technicals.Beta`)
 - **Forward P/E** (`fwd_pe`)
-- **Company description** (`General_Information.Description`) — full text, used in collapsible panel
-- **EPS beat/miss streak**: last 4 quarters from `Earnings_History` — for each, check if `epsActual >= epsEstimate` (beat = ✓, miss = ✗). Note this benchmark is the **consensus analyst estimate**, not management guidance; the dashboard labels it "vs Est" accordingly.
+- **Company description** (`General_Information.Description`) — summarize to the 1–3 sentences the card shows (`d`). Don't carry the full text through: it runs to ~2,000 characters per company, the card renders it inline rather than behind a collapsible panel, and the DATA object is paid for twice — once into `show_widget`, once written to disk.
+- **EPS beat/miss streak**: last 4 quarters from `Earnings_History` — for each, check if `epsActual >= epsEstimate` (beat = ✓, miss = ✗). If `epsActual` is null or absent — a quarter that has an estimate but hasn't reported yet — set that entry's beat flag to `-1` (neutral) instead of comparing, with `"—"` for its percent (`surprisePercent` is null too). A null compares as a miss and would otherwise put a red dot on a quarter that simply has no result. Note this benchmark is the **consensus analyst estimate**, not management guidance; the dashboard labels it "vs Est" accordingly.
 
 ### 2b. get_financial_ratios
 
@@ -312,7 +315,8 @@ The costly moves are large tool results landing in context. Keep the scan lean:
 - **Band from first-pass snippets; don't verify every name** (see 1d). Per-ticker searches return full chunks and are the biggest single cost. The one sanctioned exception is the capped "light second look" for cover-page-only names (top ~3–5, one follow-up each); the full multi-query / whole-document drill-down stays user-requested.
 - **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call. Saving to disk (Phase 3 Step 2) is fine — it injects into the template on disk — but never Read the saved file back or echo its contents to stdout, which would put the whole page through context twice.
 - **Keep the distiller preview short** (≤220 chars/ticker, top ~15) and use the compact short DATA keys as defined — don't add verbose fields.
-- `get_stock_context` and `get_financial_ratios` are one call each per included company; limiting the number of included companies (via sensible banding) is the main lever on their cost.
+- `get_stock_context` and `get_financial_ratios` are one call each per included company. Two levers on their cost: limit the number of included companies (via sensible banding), and narrow `get_stock_context` with `fields` (Phase 2a) so it returns the five sections used instead of all eleven — text mode needs only two.
+- **Summarize the company description; don't pass it through.** It is the single largest string per company (~2,000 chars raw) and the DATA object is materialized twice — into `show_widget` and to disk.
 
 ## Presenting results
 

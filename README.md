@@ -4,12 +4,16 @@
 
 Source-grounded company **SEC filings**, **financial statements**, **ratios**, **stock context**, **fund/ETF analytics**, **earnings transcripts**, **dfin.pro research reports**, and a **fundamentals stock screener** - brought into Claude Code, Cowork, OpenAI Codex, Hermes, and other AI agents through the **dfin.pro Model Context Protocol (MCP)** server.
 
-[dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships a `dfin-research` skill that guides agents to use it accurately.
+[dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships four skills that guide agents to use it accurately.
 
 ## What you get
 
 - **dfin.pro MCP tools** over the public dfin.pro MCP server: filing search, transcript search, report search, securities lookup, a fundamentals stock screener, annual financial statements, financial ratios, stock context, and fund/ETF analytics.
-- **The `dfin-research` skill** - auto-activates on financial-research questions and applies dfin.pro's analysis methodology: resolve the ticker first, ground every figure in retrieved data, verify the numbers, and cite every source.
+- **Four skills** that auto-activate on the work they fit and apply dfin.pro's analysis methodology - resolve the ticker first, ground every figure in retrieved data, verify the numbers, and cite every source:
+  - **`dfin-research`** - research a company, compare peers, pull statements, ratios, and prices, and find evidence in filings, transcripts, and dfin.pro reports.
+  - **`dfin-screener`** - build and run stock screens over the dfin.pro fundamentals screener.
+  - **`dfin-daily-filing-monitor`** - scan recent SEC filings for a topic or corporate event, enriched with market data and rendered as a dashboard.
+  - **`dfin-research-note`** - capture substantial analysis from a thread as a durable private research note.
 - **Codex and Claude packaging** - Claude plugin metadata, Codex plugin metadata (which bundles the MCP connection for Codex), and agent-facing docs links.
 
 ## Setup
@@ -27,7 +31,7 @@ Create an account at **[dfin.pro](https://www.dfin.pro)** and generate an API ke
 /plugin install dfin-financial-mcp@dfin
 ```
 
-This installs the `dfin-research` skill. On Claude Code you connect the MCP server yourself (step 3).
+This installs the four skills. On Claude Code you connect the MCP server yourself (step 3).
 
 **Codex:**
 
@@ -39,7 +43,7 @@ Then install `dfin-financial-mcp` from the **dfin.pro** marketplace - in the Cod
 
 ### 3. Connect the MCP server (Claude)
 
-On Claude the plugin installs the skill only, so you add the connection yourself. The right method depends on the client:
+On Claude the plugin installs the skills only, so you add the connection yourself. The right method depends on the client:
 
 - **Claude Code** - add `https://www.dfin.pro/mcp` as an MCP server with `Authorization: Bearer <DFIN_API_KEY>`. Use an environment variable rather than hard-coding the key.
 - **Claude Cowork and other header-less clients** - use the URL-token endpoint, where your key is embedded in the path: `https://www.dfin.pro/mcp/<your-api-key>`. Add it as a custom connector or remote MCP server, and treat the tokenized URL as a secret, since it can appear in logs and browser history.

@@ -1,0 +1,7 @@
+interface:
+  display_name: "dfin.pro Filing Monitor"
+  short_description: "Scan recent SEC filings for a topic and enrich the hits with market data."
+  brand_color: "#12ce5d"
+  default_prompt: "Scan recent SEC filings for a topic and summarize the companies involved."
+policy:
+  allow_implicit_invocation: true

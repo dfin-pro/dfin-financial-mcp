@@ -1,0 +1,7 @@
+interface:
+  display_name: "dfin.pro Screener"
+  short_description: "Find and rank public companies with the dfin.pro fundamentals screener."
+  brand_color: "#12ce5d"
+  default_prompt: "Screen for companies using dfin.pro fundamentals, valuation, and growth filters."
+policy:
+  allow_implicit_invocation: true

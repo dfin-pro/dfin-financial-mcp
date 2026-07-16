@@ -1,6 +1,6 @@
 {
   "name": "dfin-financial-mcp",
-  "version": "0.1.0",
+  "version": "0.1.03",
   "description": "dfin.pro MCP for Fundamental Research - source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, transcripts, reports, and a fundamentals screener for AI agents.",
   "author": {
     "name": "dfin.pro",
@@ -35,14 +35,18 @@
       "SEC filing evidence",
       "Financial statements and ratios",
       "Stock screening",
-      "Transcript and report search"
+      "Transcript and report search",
+      "Filing and event monitoring",
+      "Private research notes"
     ],
     "websiteURL": "https://www.dfin.pro/docs/mcp/",
-    "brandColor": "#2563EB",
+    "brandColor": "#12ce5d",
     "defaultPrompt": [
       "Research a company using dfin.pro MCP tools.",
       "Compare peers with source-grounded financial data.",
-      "Find filing, transcript, or report evidence with dfin.pro."
+      "Find filing, transcript, or report evidence with dfin.pro.",
+      "Scan recent SEC filings for a topic and summarize the companies involved.",
+      "Save this analysis as a durable dfin.pro research note."
     ]
   }
 }

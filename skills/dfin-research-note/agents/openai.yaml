@@ -1,7 +1,7 @@
 interface:
   display_name: "dfin.pro Research Note"
   short_description: "Save substantive investment analysis as notes."
-  brand_color: "#2563EB"
-  default_prompt: "Use $dfin-research-note to create a durable note from this thread's financial analysis."
+  brand_color: "#12ce5d"
+  default_prompt: "Create a durable dfin.pro research note from this thread's financial analysis."
 policy:
   allow_implicit_invocation: true
