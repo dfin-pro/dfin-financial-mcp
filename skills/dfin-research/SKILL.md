@@ -26,6 +26,7 @@ Prefer targeted searches for filings, transcripts, and reports. For company-spec
 - **Filings:** Use `search_filings` for source-text evidence from company filings. 
   * Use supported filters such as `ticker`, `fiscal_year`, `fiscal_period`, `filing_type`, `queries`, `results_per_query`, `date_from`, `date_to`, and `searchtype`. 
   * It is **strongly recommended** to use at least 2 filters to improve the search performance. Open ended searches without any filters or just one filter (e.g. just a ticker or just a filing_type) will take a long time to generate a result and may result in response code of 202 (pending). Using bounding dates, or filing_type with the ticker will dramatically improve time to generate a response.
+  * External filing retrieval may take longer than local search. If it times out, wait 30 seconds and retry the identical request once; use `agent_help(topic="methodology_search")` for the canonical external-retrieval guidance.
   * If a source search is empty, retry with better search terms before concluding the data is unavailable: vary synonyms, broaden terms, and relax supported fiscal/type filters.
 - **Transcripts:** Use `search_transcripts` for transcript evidence. Use `date_from` / `date_to` only for transcript `event_date` windows.
 - **Reports:** After company context, use `search_reports` early for company analysis or existing dfin.pro research. Use `date_from` / `date_to` only for report `published_date` windows. Keep searches lean by default; set `include_references=true` only when every returned report needs provenance.
