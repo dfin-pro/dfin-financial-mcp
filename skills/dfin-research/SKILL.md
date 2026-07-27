@@ -17,6 +17,7 @@ Answer financial questions with source-grounded data from the dfin.pro MCP: secu
 - **Ground every figure in retrieved results.** Never state a financial number, quote, date, or hard factual claim from memory. Cite the filing, transcript, report, statement source, or tool result behind it.
 - **Verify before presenting.** Confirm scope, period, currency, units, segment vs. consolidated basis, and GAAP vs. non-GAAP treatment. Recompute derived figures and show the math when useful.
 - **Do not invent parameters.** Use documented tool schemas and returned contracts. Do not guess filter names, enum values, sort fields, output fields, latest/date parameters, or unsupported periods.
+- **Discover screener contracts first.** Before constructing any screen, including an ADR screen, call `get_screener_options` for the needed mode and use its live filter definitions, values, and operators. Then pass that contract-compliant payload to `run_screener`.
 - **Handle beat/miss carefully.** Describe beat, miss, or meet only versus management guidance unless another retrieved source provides a different benchmark.
 
 ## Evidence workflow
@@ -72,6 +73,7 @@ These flows assume the agent guide has been read per the core rule. You don't ne
 - **Company-specific transcript or earnings-call question:** `search_securities` -> `get_stock_context` -> `search_transcripts`; use `date_from` / `date_to` only for `event_date` windows.
 - **Company-specific report or existing dfin.pro research question:** `search_securities` -> `get_stock_context` -> lean `search_reports`; use `get_report_details` only for one selected report's metadata/references.
 - **Price or chart request:** `search_securities` -> `get_stock_context` -> `get_price`
+- **Stock screen:** `get_screener_options` for the needed contract scope -> construct filters from the returned definitions -> `run_screener`.
 - **Global latest transcript/report request:** `list_latest_transcripts` or `list_latest_reports`.
 - **Company-specific latest transcript/report request:** `search_securities` -> `get_stock_context` -> `list_latest_transcripts` or `list_latest_reports`.
 - **Full filing/transcript/report request:** if company/stock-specific, `search_securities` -> `get_stock_context` -> select the document through search or latest results -> `get_document_content` -> get the document fetched with the doc_uuid. For greater token efficiency, use chunk_num to browse through the document in smaller chunks. Use the reference chunk_num from search results to navigate forward and backward in the document. 
