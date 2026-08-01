@@ -14,9 +14,9 @@ Source-grounded company **SEC filings**, **financial statements**, **ratios**, *
 
 ## Setup
 
-### 1. Get an API key
+### 1. Choose authentication
 
-Create an account at **[dfin.pro](https://www.dfin.pro)** and generate an API key in your account settings. The MCP uses the same `Authorization: Bearer <api_key>` credential as the REST API.
+Create an account at **[dfin.pro](https://www.dfin.pro)**. Interactive clients should connect to the canonical `https://www.dfin.pro/mcp` endpoint and complete OAuth sign-in. Existing integrations can continue to use a dfin.pro API key in the `Authorization: Bearer <api_key>` header.
 
 ### 2. Install the plugin
 
@@ -39,10 +39,12 @@ Then install `dfin-financial-mcp` from the **dfin.pro** marketplace - in the Cod
 
 ### 3. Connect the MCP server (Claude)
 
-On Claude the plugin installs the skill only, so you add the connection yourself. The right method depends on the client:
+On Claude the plugin installs the skill only, so you add the connection yourself:
 
-- **Claude Code** - add `https://www.dfin.pro/mcp` as an MCP server with `Authorization: Bearer <DFIN_API_KEY>`. Use an environment variable rather than hard-coding the key.
-- **Claude Cowork and other header-less clients** - use the URL-token endpoint, where your key is embedded in the path: `https://www.dfin.pro/mcp/<your-api-key>`. Add it as a custom connector or remote MCP server, and treat the tokenized URL as a secret, since it can appear in logs and browser history.
+- **Claude Code and Claude Cowork** - add `https://www.dfin.pro/mcp` as a custom connector or remote MCP server and complete the OAuth sign-in flow.
+- **Existing header-based integrations** - continue sending `Authorization: Bearer <DFIN_API_KEY>` if you are not ready to migrate to OAuth. Use an environment variable rather than hard-coding the key.
+
+The legacy `https://www.dfin.pro/mcp/<your-api-key>` compatibility URL remains available for older clients that support neither OAuth nor custom headers, but it is not recommended because credential-bearing URLs can be retained by client, proxy, or browser logs.
 
 For step-by-step setup per client - environment variables, the Codex install flow, and the Cowork connector - see the **[dfin.pro MCP setup docs](https://www.dfin.pro/docs/mcp/)**.
 
