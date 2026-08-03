@@ -6,6 +6,10 @@ description: >-
 
 # dfin.pro Research Note
 
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
+
+DFin skill version: 0.1.2, updated 2026-08-03.
+
 Use this skill to turn a completed analytical thread into one high-signal private note with clean metadata. The goal is to preserve the research value, not to dump the chat.
 
 ## Core Workflow
@@ -18,7 +22,7 @@ Use this skill to turn a completed analytical thread into one high-signal privat
 2. Create a concise, distinctive subject describing the analysis theme. Do not use company names or tickers here, as tickers have a dedicated field; prefer subjects like "Margin durability after mix shift" or "Capex risk in AI demand cycle."
 3. Always use `category: research`. This skill is specifically for research-note capture.
 4. Build a body that synthesizes the intelligence first, then preserves data and external references.
-5. Call `create_note` with `subject`, `body`, `category="research"`, `tickers`, and `linked_note_ids` when same-user note links or DFin stock analysis report links are relevant.
+5. Call `create_note` with `subject`, `body`, `category="research"`, and `tickers`. Use `linked_note_ids` for relevant same-user note links and `linked_report_ids` for relevant DFin stock analysis report links.
 6. Report the created note's `public_id`, subject, linked tickers, and any important omitted/uncertain references.
 
 ## What To Preserve
@@ -39,7 +43,7 @@ Include summarized or processed analytics by default when they support the note'
 Use the note body for external source references and the note tool fields for structured ticker, same-user note, and DFin stock analysis report relationships.
 
 - **Filings and transcripts:** include DFin `doc_uuid` values in the body when available. Include SEC links when they were used or surfaced. Do not put filing or transcript IDs into `linked_note_ids`.
-- **DFin research reports:** Put stock analysis report `public_id` values in `linked_note_ids`. Do not recurse through any references that were used to build the DFin research report.
+- **DFin research reports:** Put stock analysis report `public_id` values in `linked_report_ids`. Do not recurse through any references that were used to build the DFin research report.
 - **User notes:** Put relevant other notes' public IDs in `linked_note_ids` and also mention their role in the body. 
 - **Web or external sources:** include stable URLs in the body only when they materially support the note.
 - **Uncertain references:** if a claim is useful but the source identifier is missing, label it as thread-derived and avoid inventing a `doc_uuid`, public ID, or URL.

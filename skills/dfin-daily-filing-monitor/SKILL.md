@@ -5,6 +5,10 @@ description: Monitor recent SEC filings for any topic or corporate event. Use th
 
 # Daily Filing Monitor
 
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
+
+DFin skill version: 0.1.2, updated 2026-08-03.
+
 Screen recent SEC filings for any topic, then enrich each result with live stock context and financial ratios — delivered as an interactive dashboard by default, or a concise text table if the user prefers. The workflow has three phases: (1) find the relevant filings, (2) pull market and fundamental data for each company, (3) render everything in a single dashboard card per company (or skip to a text table — see Presenting results).
 
 **Scope: US-listed companies filing with the SEC.** This covers domestic issuers (8-K, 10-Q, 10-K) and foreign private issuers that file with the SEC, including ADRs (which file 20-F annual reports and 6-K interim reports). Every company here is treated as US-listed, so tickers always use the `.US` suffix — there is no non-US exchange handling in this skill.
@@ -15,7 +19,7 @@ Screen recent SEC filings for any topic, then enrich each result with live stock
 - Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing result sets and writing the saved dashboard file
 - `show_widget` for the dashboard
 
-The MCP parameters below were verified against the tool schemas. If any call rejects a parameter (API drift), call `agent_help(topic="agent_guide")` to re-check the contract rather than guessing.
+The MCP parameters below were verified against the tool schemas. If any call rejects a parameter because of API drift, inspect the live input schema rather than guessing.
 
 ---
 
@@ -85,15 +89,10 @@ results_per_query: 20
 
 ### 1d. Parse and filter results
 
-The `search_filings` result arrives **one of two ways, chosen by size, not by you** — handle them differently, on purpose, to stay token-efficient:
-
-- **Inline** — the JSON is already in the tool response and in your context. Read the array directly and band from it. The array may be wrapped under a `result` (or `results`) key, or be a bare list — take the list whichever way it comes. Do **not** write it to a scratch file or echo it just to re-run it through Python: that re-emits the whole array for no gain, since it's already delivered. Even a *largish* inline array (anything under the spill threshold) is fine to band directly — it's already in context, so those tokens are spent regardless. Just don't paste the raw array back into your reply.
-- **Saved file** (large, roughly >100KB) — spilled to disk; the tool message gives you a `<result-file-path>`. **Never read that file into context.** Distill it with the pipe below and read only the distilled output.
-
-The Python distiller below is for the **saved-file path only**, using whichever interpreter is available on this machine (`python3`, `python`, or `py -3` — on Windows `python3` is often absent). Its `normalize()` step handles the same wrapper-vs-bare-list variants you unwrap by eye on the inline path (the string / `{"text": …}` cases are defensive future-proofing against the server's wrapper changing):
+`search_filings` returns compact metadata plus a temporary `results_url` by default. If `count` is zero, stop with no matches. Otherwise fetch the URL programmatically and pipe it directly through the distiller without printing or reading the complete payload into model context. Treat the capability URL as sensitive and do not log or share it.
 
 ```bash
-cat "<result-file-path>" | python -c "
+curl --fail --silent --show-error "<results_url>" | python -c "
 import json, sys
 payload = json.loads(sys.stdin.read())
 
@@ -167,8 +166,8 @@ Three bands:
 
 - Cap it to the top ~3–5 cover-page-only names by score that are plausibly on-topic and filed in the window. Skip clear off-topic names (band them Excluded straight away).
 - Take **one** scoped follow-up per name — never an open-ended search. Pick the tighter tool:
-  - **`search_in_documents`** (default, cheapest) — search inside that ticker's filing bundle using the **full `doc_uuids` list** the distiller prints for it (covers the main 8-K plus any exhibits that came back in the first pass): `search_in_documents(doc_uuids=[<all doc_uuids for the ticker>], queries=["<one tight topic query>"], results_per_query=3)`. Jumps straight to the event text.
-  - **Strict ticker + date `search_filings`** — the fallback when `search_in_documents` still finds only front matter, i.e. the substance sits in an exhibit that never surfaced in the first pass (so the distiller has no `doc_uuid` for it): `search_filings(ticker="<TICKER>.US", date_from="<filing date>", date_to="<filing date>", queries=["<one tight query>"], results_per_query=3)`. The exact-date bound scopes it to that day's filing bundle instead of the ticker's whole history — **never run a ticker search without a date bound.**
+  - **`search_in_documents`** (default, cheapest) — search inside that ticker's filing bundle using the **full `doc_uuids` list** the distiller prints for it (covers the main 8-K plus any exhibits that came back in the first pass): `search_in_documents(doc_uuids=[<all doc_uuids for the ticker>], queries=["<one tight topic query>"], results_per_query=3, delivery="inline")`. This intentionally small follow-up can stay inline and jumps straight to the event text.
+  - **Strict ticker + date `search_filings`** — the fallback when `search_in_documents` still finds only front matter, i.e. the substance sits in an exhibit that never surfaced in the first pass (so the distiller has no `doc_uuid` for it): `search_filings(ticker="<TICKER>.US", date_from="<filing date>", date_to="<filing date>", queries=["<one tight query>"], results_per_query=3, delivery="inline")`. The exact-date bound scopes it to that day's filing bundle instead of the ticker's whole history — **never run a ticker search without a date bound.**
   - (To read a specific chunk you already know the location of, `get_document_content(doc_uuid, chunk_num)` works too, but the scoped searches above find the substance for you.)
 - Reclassify from the result: event now clear → **Confirmed** with a real one-line summary; still murky → keep **Flagged** with a sharper `flagnote`.
 - Stop as soon as you can classify — don't read whole documents or run all five queries here.
@@ -181,7 +180,7 @@ The dashboard renders flagged cards with an amber "⚑" badge and a `Flagged` fi
 
 ## Phase 2: Enrich with Market & Fundamental Data
 
-For each company that passes the filter, make two parallel calls:
+For each company that passes the filter, make the applicable calls below in parallel:
 
 **Text mode shortcut:** if the user asked for text output (no dashboard), you only need latest price, daily change, and the 1Y return — so call `get_stock_context` and **skip `get_financial_ratios`** (ratios, EPS dots, and description aren't shown in the text table). This saves one call per company.
 
@@ -189,21 +188,27 @@ For each company that passes the filter, make two parallel calls:
 
 ```
 ticker: "<TICKER>.US"
+
+# Text mode
+fields: ["price", "returns"]
+
+# Dashboard mode
+fields: ["price", "returns", "description", "technicals", "earnings_history"]
 ```
 
 All companies in scope are US-listed (including ADRs), so always use the `.US` suffix. If the ticker doesn't resolve, run `search_securities` to confirm the correct `.US` symbol before retrying.
 
-Extract the fields below. **`get_stock_context` may return with some fields missing or null** (common for recent listings, thin-coverage names, or ADRs) — this is expected, not an error. For any field that's absent, set the corresponding DATA key to `"—"` (or omit optional keys like `rb`/`rc`) and carry on; never fabricate a value and never abort the company over a missing field.
+The result is compact Markdown headed by the company name and ticker. Read the `## Price` key/value line, the `## Returns` table and `To date:` line, and the selected `## Fundamentals` subsections; do not look for legacy JSON paths or headings. **`get_stock_context` may omit unavailable fields** (common for recent listings, thin-coverage names, or ADRs) — this is expected, not an error. For any absent value, set the corresponding DATA key to `"—"` (or omit optional keys like `rb`/`rc`) and carry on; never fabricate a value and never abort the company over a missing field.
 
-- **Price & daily change** (`price`, `change`, `change_p`)
-- **Returns** (the 5 entries in `r`, in order): **Daily** = `change_p`; **WTD**, **MTD**, **YTD** from `todate_returns`; **1Y** = `1y` cumulative from `trailing_returns`
-- **Market cap** (`mkt_cap`)
-- **52-week high/low** (`high_52w`, `low_52w`) + current price for range position
-- **Volume today vs 52-week avg** (`volume`, `vol_avg52w`) → compute ratio
-- **Beta** (`Technicals.Beta`)
-- **Forward P/E** (`fwd_pe`)
-- **Company description** (`General_Information.Description`) — full text, used in collapsible panel
-- **EPS beat/miss streak**: last 4 quarters from `Earnings_History` — for each, check if `epsActual >= epsEstimate` (beat = ✓, miss = ✗). Note this benchmark is the **consensus analyst estimate**, not management guidance; the dashboard labels it "vs Est" accordingly.
+- **Price & daily change:** read the `Price:` and `Change:` groups.
+- **Returns** (the 5 entries in `r`, in order): **Daily** is the percentage in `Change:`; **WTD**, **MTD**, and **YTD** come from `To date:`; **1Y** is the `Cumulative` cell for the `1y`/`1Y` row in the Period table.
+- **Market cap:** read `Market cap:` from the Price line.
+- **52-week high/low:** read the `52w H/L:` group and combine it with the current price for range position.
+- **Volume today vs 52-week avg:** read the `Volume/52w avg:` group and compute the ratio.
+- **Beta:** read `Beta:` under `### Technicals`.
+- **Forward P/E:** read `Forward P/E:` from the Price line.
+- **Company description:** use the complete prose under `### Description` for the collapsible panel.
+- **EPS beat/miss streak:** use the last four source-ordered rows in the `### Earnings History` table and compare `EPS actual` with `EPS estimate` (beat = ✓, miss = ✗). This benchmark is the **consensus analyst estimate**, not management guidance; the dashboard labels it "vs Est" accordingly.
 
 ### 2b. get_financial_ratios
 
@@ -308,11 +313,11 @@ This costs only the small DATA payload (the template is read from disk, not cont
 
 The costly moves are large tool results landing in context. Keep the scan lean:
 
-- **Never dump the raw `search_filings` result into your reply.** Large results are auto-saved to a file — distill from the path with the Phase 1d Python script and read only the distilled output; never read the file into context. Smaller results come back inline (already in context, already small) — band directly from them, no Python round-trip needed. Either way, don't paste the raw array back into your reply.
+- **Never dump the raw `search_filings` result into your reply.** Fetch the returned capability URL directly through the Phase 1d distiller and read only the distilled output; never print or load the complete artifact into context. Use inline delivery only for the explicitly small follow-ups above.
 - **Band from first-pass snippets; don't verify every name** (see 1d). Per-ticker searches return full chunks and are the biggest single cost. The one sanctioned exception is the capped "light second look" for cover-page-only names (top ~3–5, one follow-up each); the full multi-query / whole-document drill-down stays user-requested.
 - **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call. Saving to disk (Phase 3 Step 2) is fine — it injects into the template on disk — but never Read the saved file back or echo its contents to stdout, which would put the whole page through context twice.
 - **Keep the distiller preview short** (≤220 chars/ticker, top ~15) and use the compact short DATA keys as defined — don't add verbose fields.
-- `get_stock_context` and `get_financial_ratios` are one call each per included company; limiting the number of included companies (via sensible banding) is the main lever on their cost.
+- Dashboard mode uses one scoped `get_stock_context` call and one `get_financial_ratios` call per included company; text mode uses only its two-field stock-context call. Limiting the number of included companies through sensible banding remains the main cost lever.
 
 ## Presenting results
 

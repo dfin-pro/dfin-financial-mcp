@@ -1,8 +1,11 @@
-
 ---
 name: dfin-screener
 description: Build and run dfin.pro stock screens. Use when the user wants to find, filter, sort, or rank public companies using financial, valuation, growth, technical, or other screener criteria.
 ---
+
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
+
+DFin skill version: 0.1.2, updated 2026-08-03.
 
 ## Screener workflow
 
@@ -19,6 +22,6 @@ Read the screener guidance before building screens. The examples show patterns; 
 
 ## Common requests
 
-These flows assume the agent guide has been read per the core rule. You don't need to re-run search_securities or get_stock_context for a company you already resolved or fetched context for earlier.
+You don't need to re-run search_securities or get_stock_context for a company you already resolved or fetched context for earlier.
 
 - **Screen for candidates:** `get_screener_options()` or `get_screener_options(mode="all")` -> `run_screener(...)`. Research selected companies only when requested.

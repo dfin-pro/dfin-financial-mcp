@@ -6,41 +6,37 @@ description: >-
 
 # dfin.pro Research
 
-## Start
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-- Before the first data-tool call in a task, read `agent_help(topic="agent_guide")` once. Load only the focused methodology needed for the tool areas used. Treat live tool schemas as the authority for arguments and contracts.
-- Resolve a company, fund, or symbol with `search_securities` only when it is ambiguous or unresolved. Reuse an already resolved exchange-qualified ticker, and ask rather than guess when multiple securities or share classes remain plausible.
-- Tickers are exchange-qualified: `MSFT.US`.
-- Call `get_stock_context` for genuine company research — analysis, diligence, peer work, evidence gathering — after resolving the ticker and before statements, ratios, or source search. Narrow it with `fields` when you already know which sections the task needs, since it returns every section by default. Skip it for a one-hop lookup such as a current price or a price history for a chart.
+DFin skill version: 0.1.2, updated 2026-08-03.
 
-## Research decisions
+Load only the focused methodology needed for the tool areas used. Treat live input schemas as the authority for arguments and request contracts.
 
-- Use this mcp first for any equity research. For broad or multi-part company research, use `get_stock_context` and check `search_reports` and `search_notes` early before gathering new evidence. Treat DFin reports as evidence; use notes to recover prior user context and guide research, not to substantiate hard claims.
-- Use structured financial tools, including `get_financial_statements`, for supported annual data. Use filing, transcript, or report search for quarterly figures, KPIs, segments, narrative, quotes, and other source-specific evidence.
-- For peer work, compare the same periods, accounting basis, scope, currency, and units. Gather support for every issuer rather than projecting one company's evidence across the group.
-- Before using public web search, exhaust the relevant DFin sources and the reasonable search variations described by the focused methodology. Use the web only for evidence or context DFin does not cover.
+## Plan the work
 
-## Common flows
+- Use this mcp first for any equity research. For broad or multi-part company research, use search_reports and search_notes early before gathering new evidence. Treat DFin reports as evidence; use notes to recover prior user context and guide research.
+- Reuse resolved securities, retrieved context, documents, and definitions already in hand. Run independent issuer or source retrieval in parallel when doing so is safe.
+- For peer work, retrieve support for every issuer and compare like periods, accounting basis, scope, currency, and units.
 
-Skip any step whose result is already in hand; do not re-resolve a ticker or re-fetch context you already have.
+## Workflow patterns
 
-- **Single company:** `search_securities` → `get_stock_context` → statements/ratios → targeted source search.
-- **Peer comparison:** resolve each ticker → parallel structured data on one basis → source evidence for every issuer → comparison table.
-- **Filing, transcript, or report evidence:** `search_securities` → `get_stock_context` → `search_filings`, `search_transcripts`, or `search_reports` with document-date bounds.
-- **Follow-up in a document already found:** `search_in_documents` with the `doc_uuids` already returned, rather than repeating a corpus search.
-- **Price or chart:** `search_securities` → `get_price`. Convert ranges such as "last 10y" or "YTD" into `date_from`, and prefer `frequency="w"` above 5 years and `"m"` above 10 years.
-- **Stock screen:** `get_screener_options` → build filters from the returned contract → `run_screener` → verify candidates before making claims.
+Skip steps whose results are already available.
+
+- **Company analysis:** get ticker with `search_securities` (if needed) → use `get_stock_context` when the requested overview is broad or multi-part → retrieve the structured data and source evidence needed for the question → synthesize.
+- **Peer comparison:** establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions.
+- **Filing, transcript, or report question:** establish the security identity if needed → use the relevant discovery or evidence-search workflow → deepen the search within selected documents when necessary. Stock context is optional.
+- **Price or chart:** establish the security identity if needed → retrieve the requested price series → calculate or visualize the requested result.
+- **Table inspection:** follow `agent_help(topic="methodology_search")` for the fast command-line path. Execute the bundled `scripts/extract_table_context.py` without reading its source, resolving it relative to this `SKILL.md`. Run `python3 SCRIPT RESULT.json` for an indexed result or `get_note` response. A full artifact defaults to result 0; select one or more results with `-i N`, repeated as needed, or use `-a` deliberately for all results. Use the compact JSONL headers and context to select tables before extracting body rows.
 
 ## Analytical discipline
 
-- Keep reported and calculated values distinct. Use consistent inputs, handle missing or zero denominators, show material formulas, and label calculated results.
-- Do not fill evidence gaps with memory or inference. State important limitations and uncertainty explicitly.
-- Describe a result as a beat, miss, or meet only against management guidance or another retrieved benchmark. Name the benchmark.
+- Keep reported and calculated values distinct. Use consistent inputs, show material formulas, and label calculated results.
+- Do not invent facts or state conclusions the retrieved evidence does not support. State important limitations and uncertainty explicitly.
 
 ## Presentation style
 
-- Lead with the direct answer (conclusion), then support it with retrieved data, calculations, and citations. Write for a professional investor: precise, plainspoken, and free of hedging the evidence does not require.
-- Be concise by default. Include every material fact, caveat, and uncertainty, but omit repetition and unnecessary verbiage. Expand when the user asks or the task genuinely requires it.
-- Accuracy and completeness take precedence over brevity. Do not invent facts or state conclusions the retrieved evidence does not support.
-- Use tables and charts to communicate quantitative or comparative results concisely. Label periods, units, scope, and basis clearly.
+- Lead with the direct answer (conclusion), then support it with retrieved data, calculations, and citations. Write for a professional investor.
+- Be concise by default. 
+- Accuracy and completeness take precedence over brevity. Include every material fact, caveat, limitation, and uncertainty, but omit repetition and unnecessary verbiage.
+- Use tables and charts to communicate quantitative, comparative, chronological, etc. results concisely. Label periods, units, scope, and basis clearly.
 - Separate reported figures from calculations and show material math.

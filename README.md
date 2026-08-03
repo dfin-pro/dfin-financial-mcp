@@ -4,12 +4,15 @@
 
 Source-grounded company **SEC filings**, **financial statements**, **ratios**, **stock context**, **fund/ETF analytics**, **earnings transcripts**, **dfin.pro research reports**, and a **fundamentals stock screener** - brought into Claude Code, Cowork, OpenAI Codex, Hermes, and other AI agents through the **dfin.pro Model Context Protocol (MCP)** server.
 
-[dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships a `dfin-research` skill that guides agents to use it accurately.
+[dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships four skills that guide agents through research, screening, note capture, and filing monitoring.
 
 ## What you get
 
 - **dfin.pro MCP tools** over the public dfin.pro MCP server: filing search, transcript search, report search, securities lookup, a fundamentals stock screener, annual financial statements, financial ratios, stock context, and fund/ETF analytics.
-- **The `dfin-research` skill** - auto-activates on financial-research questions and applies dfin.pro's analysis methodology: resolve the ticker first, ground every figure in retrieved data, verify the numbers, and cite every source.
+- **The `dfin-research` skill** - handles source-grounded public-company, security, peer, earnings, statement, ratio, filing, transcript, report, price, and fund research.
+- **The `dfin-screener` skill** - builds and runs contract-backed stock screens across financial, valuation, growth, technical, and other supported criteria.
+- **The `dfin-research-note` skill** - saves substantial completed analysis as structured private research notes with ticker, note, report, and source references.
+- **The `dfin-daily-filing-monitor` skill** - scans recent SEC filings for a requested theme or corporate event and presents an enriched briefing or dashboard.
 - **Codex and Claude packaging** - Claude plugin metadata, Codex plugin metadata (which bundles the MCP connection for Codex), and agent-facing docs links.
 
 ## Setup
@@ -27,7 +30,7 @@ Create an account at **[dfin.pro](https://www.dfin.pro)**. Interactive clients s
 /plugin install dfin-financial-mcp@dfin
 ```
 
-This installs the `dfin-research` skill. On Claude Code you connect the MCP server yourself (step 3).
+This installs the four bundled skills. On Claude Code you connect the MCP server yourself (step 3).
 
 **Codex:**
 
@@ -39,7 +42,7 @@ Then install `dfin-financial-mcp` from the **dfin.pro** marketplace - in the Cod
 
 ### 3. Connect the MCP server (Claude)
 
-On Claude the plugin installs the skill only, so you add the connection yourself:
+On Claude the plugin installs the skills only, so you add the connection yourself:
 
 - **Claude Code and Claude Cowork** - add `https://www.dfin.pro/mcp` as a custom connector or remote MCP server and complete the OAuth sign-in flow.
 - **Existing header-based integrations** - continue sending `Authorization: Bearer <DFIN_API_KEY>` if you are not ready to migrate to OAuth. Use an environment variable rather than hard-coding the key.
@@ -50,22 +53,16 @@ For step-by-step setup per client - environment variables, the Codex install flo
 
 ## Documentation
 
-For human-readable documentation, start here:
+Use the public website directly rather than relying on MCP resource discovery:
 
-- [Docs map](https://www.dfin.pro/docs/) - navigation for humans and agents
-- [MCP setup](https://www.dfin.pro/docs/mcp/) - MCP connection, authentication, resources, and response conventions
-- [MCP agent guide](https://www.dfin.pro/docs/mcp/agent-guide/) - which MCP tool to call and when
-- [REST API reference](https://www.dfin.pro/docs/api/v1/) - detailed REST contracts when you need lower-level API details
-
-Once connected, the server exposes its own guidance as MCP resources:
-
-- `dfin://docs` - documentation map
-- `dfin://docs/mcp/agent-guide` - MCP-first tool-selection guidance
-- `dfin://docs/mcp` - MCP setup, auth, resources, and response conventions
-- `dfin://docs/methodology` - financial-analysis workflow, verification discipline, and citations
-- `dfin://docs/api/v1` - REST developer reference for detailed request and response contracts
-
-When discovering resources, use the `dfin://...` resource URIs directly when your MCP client supports that. If your client requires a server filter before listing resources, use the configured server id shown by that client, or list all resources and select the DFin entries. Do not infer the resource server id from a normalized tool namespace such as `mcp__dfin_pro`, because clients may use different labels for tool namespaces and resource server ids.
+- [Documentation map](https://www.dfin.pro/docs.md) - the complete documentation index
+- [MCP setup](https://www.dfin.pro/docs/mcp/) - connection and authentication for supported clients
+- [MCP agent guide](https://www.dfin.pro/docs/mcp/agent-guide.md) - the required first read for tool selection and methodology routing
+- [Search methodology](https://www.dfin.pro/docs/methodology/search.md) - search, provenance, and document handling
+- [Financials methodology](https://www.dfin.pro/docs/methodology/financials.md) - structured statements, ratios, sourcing, and verification
+- [Screening methodology](https://www.dfin.pro/docs/methodology/screening.md) - contract discovery and safe screener construction
+- [Notes methodology](https://www.dfin.pro/docs/methodology/notes.md) - private-note selection, privacy, linking, and ownership
+- [REST API reference](https://www.dfin.pro/docs/api/v1.md) - detailed lower-level request and response contracts
 
 ## Links
 
