@@ -1,6 +1,6 @@
 {
   "name": "dfin-financial-mcp",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "dfin.pro MCP for Fundamental Research - source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, transcripts, reports, and a fundamentals screener for AI agents.",
   "author": {
     "name": "dfin.pro",

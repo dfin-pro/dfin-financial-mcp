@@ -8,7 +8,7 @@ description: >-
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.2, updated 2026-08-03.
+DFin skill version: 0.1.3, updated 2026-08-03.
 
 Use this skill to turn a completed analytical thread into one high-signal private note with clean metadata. The goal is to preserve the research value, not to dump the chat.
 

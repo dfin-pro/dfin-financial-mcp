@@ -8,7 +8,7 @@ description: >-
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.2, updated 2026-08-03.
+DFin skill version: 0.1.3, updated 2026-08-03.
 
 Load only the focused methodology needed for the tool areas used. Treat live input schemas as the authority for arguments and request contracts.
 
@@ -26,7 +26,7 @@ Skip steps whose results are already available.
 - **Peer comparison:** establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions.
 - **Filing, transcript, or report question:** establish the security identity if needed → use the relevant discovery or evidence-search workflow → deepen the search within selected documents when necessary. Stock context is optional.
 - **Price or chart:** establish the security identity if needed → retrieve the requested price series → calculate or visualize the requested result.
-- **Table inspection:** follow `agent_help(topic="methodology_search")` for the fast command-line path. Execute the bundled `scripts/extract_table_context.py` without reading its source, resolving it relative to this `SKILL.md`. Run `python3 SCRIPT RESULT.json` for an indexed result or `get_note` response. A full artifact defaults to result 0; select one or more results with `-i N`, repeated as needed, or use `-a` deliberately for all results. Use the compact JSONL headers and context to select tables before extracting body rows.
+- **Table inspection:** follow `agent_help(topic="methodology_search")` and execute the bundled `scripts/extract_table_context.py`, resolving it relative to this `SKILL.md`.
 
 ## Analytical discipline
 

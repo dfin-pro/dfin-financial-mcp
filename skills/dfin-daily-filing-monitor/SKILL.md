@@ -7,7 +7,7 @@ description: Monitor recent SEC filings for any topic or corporate event. Use th
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.2, updated 2026-08-03.
+DFin skill version: 0.1.3, updated 2026-08-03.
 
 Screen recent SEC filings for any topic, then enrich each result with live stock context and financial ratios — delivered as an interactive dashboard by default, or a concise text table if the user prefers. The workflow has three phases: (1) find the relevant filings, (2) pull market and fundamental data for each company, (3) render everything in a single dashboard card per company (or skip to a text table — see Presenting results).
 
