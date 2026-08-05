@@ -11,7 +11,7 @@ Source-grounded company **SEC filings**, **financial statements**, **ratios**, *
 - **dfin.pro MCP tools** over the public dfin.pro MCP server: filing search, transcript search, report search, securities lookup, a fundamentals stock screener, annual financial statements, financial ratios, stock context, and fund/ETF analytics.
 - **The `dfin-research` skill** - handles source-grounded public-company, security, peer, earnings, statement, ratio, filing, transcript, report, price, and fund research.
 - **The `dfin-screener` skill** - builds and runs contract-backed stock screens across financial, valuation, growth, technical, and other supported criteria.
-- **The `dfin-research-note` skill** - saves substantial completed analysis as structured private research notes with ticker, note, report, and source references.
+- **The `dfin-note` skill** - saves completed financial research or material news as structured private notes with research or news categories and source relationships.
 - **The `dfin-daily-filing-monitor` skill** - scans recent SEC filings for a requested theme or corporate event and presents an enriched briefing or dashboard.
 - **Codex and Claude packaging** - Claude plugin metadata, Codex plugin metadata (which bundles the MCP connection for Codex), and agent-facing docs links.
 

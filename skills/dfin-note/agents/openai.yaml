@@ -1,0 +1,7 @@
+interface:
+  display_name: "dfin.pro Note"
+  short_description: "Save financial research and news as notes."
+  brand_color: "#2563EB"
+  default_prompt: "Use $dfin-note to save this financial research or news as a private dfin.pro note."
+policy:
+  allow_implicit_invocation: true
