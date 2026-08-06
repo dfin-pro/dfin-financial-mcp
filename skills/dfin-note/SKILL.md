@@ -43,6 +43,7 @@ Use the note body for external source references and the note tool fields for st
 - Put filing and transcript `doc_uuid` values and used SEC links in the body. Do not put filing or transcript IDs in `linked_note_ids`.
 - For selected DFin stock analysis report relationships, follow the report-identifier flow in the notes methodology and put each resolved `report_id` in `linked_report_ids`. Do not recurse through sources used to build a DFin report.
 - Put relevant same-user note IDs in `linked_note_ids` and explain their role in the body.
+- When referring to a related note or DFin report in the body, retrieve its canonical URL with `get_note` or `get_report_details` and write a Markdown link whose descriptive text identifies the relevant research. Do not present a bare `note_id` or `report_id` as the user-facing reference; keep IDs in `linked_note_ids` and `linked_report_ids`. Never invent a URL when the canonical URL is unavailable.
 - Put stable material web URLs in the body.
 - Label useful claims with missing source identifiers as thread-derived; never invent identifiers or URLs.
 
