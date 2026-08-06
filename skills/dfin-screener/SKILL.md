@@ -5,7 +5,7 @@ description: Build and run dfin.pro stock screens. Use when the user wants to fi
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.4, updated 2026-08-04.
+DFin skill version: 0.1.4, updated 2026-08-05.
 
 ## Screener workflow
 

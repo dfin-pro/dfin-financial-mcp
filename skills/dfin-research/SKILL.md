@@ -8,7 +8,7 @@ description: >-
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.4, updated 2026-08-04.
+DFin skill version: 0.1.4, updated 2026-08-05.
 
 Load only the focused methodology needed for the tool areas used. Treat live input schemas as the authority for arguments and request contracts.
 
