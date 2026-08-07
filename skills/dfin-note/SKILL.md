@@ -27,6 +27,7 @@ Read [references/news.md](references/news.md) for every news note and whenever o
 2. Collect source identifiers, exact document chunks used as evidence, and all materially affected exchange-qualified tickers. Do not add tangential securities.
 3. Discover related prior research.
     - Read `agent_help(topic="methodology_search")` once before the first `search_notes` call, if it has not already been read, then call `search_notes` to find relevant existing user notes.
+    - Keep the default API delivery for `search_notes` and follow the notes methodology for artifact handling and its policy-only inline fallback. Use inline delivery **only if access to www.dfin.pro api is blocked**.
     - Use `find_linked_notes` when a known note, ticker, report, transcript, or permanent document UUID may expose relevant connections. Omit the query for structural proximity; reuse or refine the research query when relevance ordering is more useful.
     - Keep graph exploration bounded: start from the strongest seed, then re-seed at most twice when a result opens a distinct branch relevant to the saved conclusion. Prefer `max_hops=1` for follow-ups and stop sooner if no materially new candidates appear. Do not recursively expand results or exhaust pagination unless the user requests broader research.
     - Deduplicate overlapping discoveries by `note_id`.
@@ -55,9 +56,4 @@ Read [references/news.md](references/news.md) for every news note and whenever o
 
 ## Quality Bar
 
-- Make the note understandable without reopening the original chat or article.
-- Write the body as valid Markdown. Use headings, paragraphs, lists, tables, emphasis, and links only when they improve readability; never leave placeholder text or empty headings.
-- Stay faithful to the supplied material and completed analysis. Distinguish reported facts, company or source claims, calculations, and fresh inference; clearly label new conclusions as fresh inference and cite their supporting evidence.
-- Keep readable body citations close to the claims they support, and retain machine identifiers and evidence locations only in structured note fields.
-- Keep the scope proportionate. Omit long copied passages, routine background, unrelated tool logs, prompt chatter, and mechanical steps. Never save secrets, API keys, credentials, or unrelated private conversation.
-- For complex work in either mode, read `agent_help(topic="output_guidelines")` once before drafting if not already read. Complex work includes multi-source synthesis, material calculations or reconciliations, peer comparisons, thesis or valuation judgments, or substantial tables or charts. Do not load it for routine capture.
+- Read `agent_help(topic="output_guidelines")` once before drafting, if not already read

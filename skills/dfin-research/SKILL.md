@@ -18,7 +18,8 @@ Load only the focused methodology needed for the tool areas used. Treat live inp
 - Before each call to `search_filing`, name every filter and its reason: ticker · filing_type · fiscal_year · fiscal_period · date bounds · searchtype. Leaving one empty is a decision. State it.
 
 ## Token efficiency
-- Be token efficient. Follow the guidance provided in the methodology documents for efficient processing of search results.
+
+- Use API delivery for search results. If a returned artifact URL is blocked, follow the `methodology_search` fallback exactly; do not substitute inline delivery for other failures or convenience.
 - Load tool schemas with select:, never a broad keyword query — a keyword query with max_results ≥ tool count returns the entire server. Statements task → select:mcp__dfin__agent_help,mcp__dfin__get_financial_statements, mcp__dfin__get_financial_statement_options
     Add only if the question needs segments, KPIs, quarters, or quotes: select:mcp__dfin__search_filings,mcp__dfin__search_in_documents
 

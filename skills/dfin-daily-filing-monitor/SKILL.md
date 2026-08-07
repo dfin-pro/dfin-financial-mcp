@@ -13,11 +13,11 @@ Monitor US-listed SEC filers, including foreign private issuers and ADRs. Keep e
 
 ## Non-negotiable context boundary
 
-- Filing and document searches return artifacts; pass their URLs directly to the local helpers.
-- Request dashboard stock context once for all resolved tickers. Pass either its shared artifact URL or its complete compact inline batch directly to the dashboard helper, matching the MCP response mode.
+- Keep filing and document searches on API delivery and pass their artifact URLs directly to local helpers. If a harness security policy blocks the URL, follow the `methodology_search` allowlist, retry, warning, and inline sequence exactly; inline is not a fallback for any other failure.
+- Request stock context once for all resolved tickers with the delivery mode selected below. Pass its artifact URL or complete inline batch directly to the dashboard helper.
 - Treat every capability URL as sensitive. Never quote, log, persist, or share it.
-- Download artifacts only into local helpers. Never print, read, or return a complete artifact or chunk to model context.
-- Allow only the helper's bounded summaries, selected evidence, and compact statuses into context.
+- Download artifacts only into local helpers. Except for a methodology-approved inline fallback, never print, read, or return a complete artifact or chunk to model context.
+- When inline fallback is required, write the direct response unchanged to temporary JSON without quoting or analyzing it. Use only the helper's bounded summaries and selected evidence for classification.
 - Never read a generated dashboard back merely to inspect it. Materialize it once only when a host renderer requires complete HTML.
 
 Use the bundled scripts without reading their source during a normal run:
@@ -54,6 +54,7 @@ date_to: <inclusive filing date>
 filing_type: <one form>
 queries: <3-5 queries>
 results_per_query: 5
+delivery: api
 include_content_head: true
 include_content_tail: false
 content_preview_chars: 120
@@ -68,6 +69,14 @@ python3 <skill-dir>/scripts/filing_artifact.py summarize --fetch --save <tempora
 ```
 
 The helper prints no more than 15 accession-level bundle summaries with previews of at most 220 characters, one validated SEC source link per bundle, and explicit remaining-count metadata. Keep the temporary artifact outside the repository and delete it after the scan. If `truncated` is true, request another page with `--offset <offset + shown_count>` only when the first page is deficient or the user requested exhaustive coverage.
+
+If the methodology-approved security-policy fallback required `delivery: inline`, write the direct response unchanged to `<temporary-json-path>`, then run:
+
+```text
+python3 <skill-dir>/scripts/filing_artifact.py summarize --artifact <temporary-json-path>
+```
+
+Do not invent or rewrite an artifact URL. Both delivery branches now use the same temporary file for later bundle selection; resume with the identity rules.
 
 ### Identity rules
 
@@ -92,7 +101,7 @@ For only the top 3–5 plausible cover-page-only bundles, take one scoped second
 python3 <skill-dir>/scripts/filing_artifact.py select --artifact <temporary-json-path> --bundle <bundle-id>
 ```
 
-Use the returned UUID batches in `search_in_documents` with one tight query and `results_per_query: 3`. Never send more than 20 UUIDs. Process that artifact through the helper and stop when classification is possible. The selected result includes an `evidence_location` with the exact matching `doc_uuid`, `chunk_num`, and `content_chars`; if the bounded evidence ends at a material boundary, retrieve only that known chunk.
+Use the returned UUID batches in `search_in_documents` with one tight query, `results_per_query: 3`, and `delivery: api`. Never send more than 20 UUIDs. For API delivery, pass the returned URL to `summarize --fetch --save <second-look-json-path>`. If the methodology-approved security-policy fallback requires inline delivery, write its direct response unchanged to `<second-look-json-path>` and run `summarize --artifact <second-look-json-path>`. Use `select --artifact <second-look-json-path> --bundle <bundle-id>` only when the summary remains inconclusive, then stop when classification is possible. The selected result includes an `evidence_location` with the exact matching `doc_uuid`, `chunk_num`, and `content_chars`; if the bounded evidence ends at a material boundary, retrieve only that known chunk. Delete the second-look file after classification.
 
 If the needed exhibit was absent, use one exact-ticker, exact-filing-date `search_filings` call with one tight query. Never run a ticker follow-up without a date bound.
 
@@ -102,21 +111,21 @@ For a user-requested company deep dive, search selected bundle documents with fo
 
 ### Text mode
 
-Call `get_stock_context` once with all resolved `tickers` and `fields: ["price", "returns"]`. Skip ratios and descriptions. Create the same compact company-and-filing manifest used below, but include exactly one stock source from the response: `stock_context` for an inline batch or `stock_context_url` for an artifact. Feed it to:
+Call `get_stock_context` once with all resolved `tickers`, `fields: ["price", "returns"]`, and `delivery: inline`. Skip ratios and descriptions. Put the complete compact batch in the manifest as `stock_context`, then feed it to:
 
 ```text
 python3 <skill-dir>/scripts/build_dashboard.py --text --stock-cache <temporary-cache-path>
 ```
 
-Present only the returned rows in the table described below. This path handles either MCP response mode while keeping artifact contents out of model context. Delete the cache after the final result.
+Present only the returned rows in the table described below. Delete the cache after the final result.
 
 ### Dashboard mode
 
 Read `methodology_financials`. Then:
 
 1. For every resolved included company, call `get_financial_ratios` for the current year with `period: "FY"` and fields `returnOnEquity`, `returnOnInvestedCapital`, `netDebtToEBITDA`, and `ebitdaMargin`. On unavailable data, try the prior year and then one year earlier; stop at the first valid response.
-2. Call `get_stock_context` once with all resolved `tickers` and fields `price`, `returns`, `profile`, `description`, `technicals`, and `earnings_history`. The MCP may return either a compact inline batch or one shared artifact, depending on response size.
-3. Put the compact ratio responses and exactly one stock source in the dashboard manifest: `stock_context` for the complete inline batch or `stock_context_url` for the shared capability URL. Do not inspect an artifact payload.
+2. Call `get_stock_context` once with all resolved `tickers` and `delivery: api`. Omit `fields`; API delivery returns the complete shared artifact and rejects a supplied field selector.
+3. Put the compact ratio responses and the shared capability URL in the dashboard manifest as `stock_context_url`. Do not inspect the artifact payload.
 
 The builder extracts only top-level company name, ticker, description, structured price/returns/technicals, date-keyed earnings history, and allowlisted profile fields. It discards database, user-note, executive, estimate, and other unused sections.
 
