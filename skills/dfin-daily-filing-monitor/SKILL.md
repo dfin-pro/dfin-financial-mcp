@@ -1,336 +1,193 @@
 ---
 name: dfin-daily-filing-monitor
-description: Monitor recent SEC filings for any topic or corporate event. Use this skill whenever the user wants to screen, scan, or monitor SEC filings for a specific theme — management changes, executive appointments, debt restructuring, M&A activity, earnings guidance, regulatory events, or any other topic. Triggers on phrases like "any [topic] filings recently?", "monitor for [topic]", "scan recent 8-Ks for [topic]", "what companies announced [topic] this week?", "daily filing briefing", "morning scan", or any request to track corporate events across multiple companies via SEC disclosures. Also use when the user says something casual like "what happened in filings today" or "any interesting 8-Ks this week?".
+description: Monitor recent SEC filings for a named topic or corporate event. Use this skill when the user wants to screen, scan, or monitor SEC filings for a specific theme such as management changes, executive appointments, debt restructuring, M&A activity, earnings guidance, or regulatory events. Triggers include "management changes announced today", "morning scan for debt restructuring", "daily M&A filing monitor", "any [topic] filings recently?", "scan recent 8-Ks for [topic]", and "what companies announced [topic] this week?". Do not use it for theme-less filing-news briefings.
 ---
 
 # Daily Filing Monitor
 
-Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
+Before the first DFin call, read `agent_help(topic="agent_guide")` once. Read `methodology_search` before discovery, `methodology_financials` before ratio enrichment, and `output_guidelines` before presenting substantive results.
 
-DFin skill version: 0.1.4, updated 2026-08-05.
+DFin skill version: 0.1.6, updated 2026-08-07.
 
-Screen recent SEC filings for any topic, then enrich each result with live stock context and financial ratios — delivered as an interactive dashboard by default, or a concise text table if the user prefers. The workflow has three phases: (1) find the relevant filings, (2) pull market and fundamental data for each company, (3) render everything in a single dashboard card per company (or skip to a text table — see Presenting results).
+Monitor US-listed SEC filers, including foreign private issuers and ADRs. Keep exchange-qualified tickers exactly as returned. Deliver one company card with one nested section per filing bundle, or a concise table when the user requests text.
 
-**Scope: US-listed companies filing with the SEC.** This covers domestic issuers (8-K, 10-Q, 10-K) and foreign private issuers that file with the SEC, including ADRs (which file 20-F annual reports and 6-K interim reports). Every company here is treated as US-listed, so tickers always use the `.US` suffix — there is no non-US exchange handling in this skill.
+## Non-negotiable context boundary
 
-## Requirements
+- Filing and document searches return artifacts; pass their URLs directly to the local helpers.
+- Request dashboard stock context once for all resolved tickers. Pass either its shared artifact URL or its complete compact inline batch directly to the dashboard helper, matching the MCP response mode.
+- Treat every capability URL as sensitive. Never quote, log, persist, or share it.
+- Download artifacts only into local helpers. Never print, read, or return a complete artifact or chunk to model context.
+- Allow only the helper's bounded summaries, selected evidence, and compact statuses into context.
+- Never read a generated dashboard back merely to inspect it. Materialize it once only when a host renderer requires complete HTML.
 
-- dfin.pro MCP must be connected (`search_filings`, `get_stock_context`, `get_financial_ratios`; plus `search_in_documents` / `get_document_content` for the light second look in 1d)
-- Bash + an available Python interpreter (`python3`, `python`, or `py -3`) for parsing result sets and writing the saved dashboard file
-- `show_widget` for the dashboard
+Use the bundled scripts without reading their source during a normal run:
 
-The MCP parameters below were verified against the tool schemas. If any call rejects a parameter because of API drift, inspect the live input schema rather than guessing.
+- `scripts/filing_artifact.py`: fetch, group, summarize, and select filing evidence.
+- `scripts/build_dashboard.py`: consume inline or artifact stock context, assemble safe DATA, and write the dashboard or compact text rows.
 
----
+## 1. Route the request
 
-## Phase 1: Find Relevant Filings
+Extract the topic, date window, requested forms, sector filter, and output mode. Require one named event, theme, or evidence target. If this skill is explicitly invoked without one, ask for one monitoring theme and make no DFin calls. Otherwise default to the last two calendar days. Use seven days for “this week” and one day for “today.” Do not ask for clarification when the topic is clear and a reasonable interpretation is safe.
 
-### 1a. Parse the request
+Choose forms:
 
-Extract:
-- **Topic**: What kind of corporate event? (e.g. "management changes", "debt restructuring", "M&A")
-- **Date range**: Default = last 2 calendar days from today. Accept natural language ("this week" → 7 days, "today" → 1 day). Format as `YYYY-MM-DD`.
-- **Filing type**: Default `8-K` (the domestic current-report form where most event-driven disclosures land). Use `10-Q`/`10-K` only if explicitly requested. For foreign private issuers / ADRs, the equivalents are `6-K` (interim/current events, analogous to 8-K) and `20-F` (annual report, analogous to 10-K) — include these when the scan should cover ADRs or when explicitly requested.
-- **Sector filter**: Note it — apply as a post-filter since `search_filings` has no sector parameter.
-- **Output mode**: Default = dashboard. Switch to **text mode** if the request says anything like "don't build a dashboard", "no dashboard", "just list them", or "just text" — then skip Phase 3 and present a concise table instead (see Presenting results).
+- Honor explicit forms exactly.
+- For a generic cross-company current-event scan, search `8-K` and `6-K` separately.
+- Add `10-Q`, `10-K`, or `20-F` only when explicitly requested or directly required by the topic.
+- Never combine multiple forms into one `filing_type`; it is scalar.
 
-Don't ask for clarification upfront — make a reasonable assumption and proceed.
+Use dashboard mode by default. Use text mode when the user says “no dashboard,” “just list them,” “just text,” or equivalent.
 
-### 1b. Generate 5 search queries
+## 2. Discover filings efficiently
 
-Cover the topic from five angles:
+Create 3–5 short, source-native queries covering plain language, legal terminology, the applicable SEC item, and only the most relevant process or financial terms. Examples:
 
-- **Query 1 — Plain language**: How a press release would describe it.
-- **Query 2 — Legal/technical language**: The terminology that appears inside SEC filings.
-- **Query 3 — SEC item number**: The specific 8-K item that triggers this disclosure type.
-- **Query 4 — Process/transition terms**: Procedural language around timing, approvals, successors.
-- **Query 5 — Financial/compensation terms**: The financial aspects that accompany the event.
+- Management: `new CEO CFO appointed resigned`, `Item 5.02 appointment departure`, `interim successor effective date`.
+- M&A: `merger acquisition definitive agreement`, `purchase price closing conditions`, `Item 1.01 merger`.
+- Debt: `credit agreement refinancing restructuring`, `covenant waiver maturity extension`, `Chapter 11 reorganization`.
 
-Common 8-K items:
-| Item | Event type |
-|------|-----------|
-| 5.02 | Executive departures, appointments, director changes |
-| 1.01 | Material agreements (M&A, credit facilities) |
-| 1.03 | Bankruptcy or receivership |
-| 2.02 | Earnings releases, results of operations |
-| 2.06 | Material impairments |
-| 8.01 | Other material events |
+Call `search_filings` separately per form:
 
-**Example — management changes:**
-1. `"new CEO CFO president appointed management change"`
-2. `"appointment chief executive officer principal officer departure resignation"`
-3. `"Item 5.02 departure appointment directors certain officers"`
-4. `"effective date successor interim transition board approved"`
-5. `"employment agreement base salary severance compensation executive"`
-
-**Example — M&A:**
-1. `"merger acquisition deal announced definitive agreement"`
-2. `"purchase price consideration closing conditions representations warranties"`
-3. `"Item 1.01 material definitive agreement merger acquisition"`
-4. `"regulatory approval antitrust HSR filing closing conditions"`
-5. `"cash per share premium enterprise value EBITDA multiple consideration"`
-
-**Example — debt restructuring:**
-1. `"debt restructuring refinancing credit agreement"`
-2. `"term loan revolving facility amendment restated bankruptcy"`
-3. `"Chapter 11 reorganization plan Item 1.03 credit agreement amendment"`
-4. `"lenders noteholders consent solicitation exchange offer waiver"`
-5. `"covenant leverage ratio interest coverage liquidity maturity extension"`
-
-### 1c. Run search_filings
-
-```
-filing_type: "8-K"
-date_from: <computed>
-date_to: <today>
-queries: [query1, query2, query3, query4, query5]
-results_per_query: 20
+```yaml
+date_from: <inclusive filing date>
+date_to: <inclusive filing date>
+filing_type: <one form>
+queries: <3-5 queries>
+results_per_query: 5
+include_content_head: true
+include_content_tail: false
+content_preview_chars: 120
 ```
 
-### 1d. Parse and filter results
+Expand only a deficient query and never above 10 results without stating why. On an external SEC timeout, wait 30 seconds and retry once unchanged; then narrow one filter or report temporary unavailability.
 
-`search_filings` returns compact metadata plus a temporary `results_url` by default. If `count` is zero, stop with no matches. Otherwise fetch the URL programmatically and pipe it directly through the distiller without printing or reading the complete payload into model context. Treat the capability URL as sensitive and do not log or share it.
+Pass each returned `results_url` on stdin to the filing helper; never place it in prose:
 
-```bash
-curl --fail --silent --show-error "<results_url>" | python -c "
-import json, sys
-payload = json.loads(sys.stdin.read())
-
-def normalize(x):
-    # dict-wrapped ({'result'/'results': [...]}, FastMCP auto-wrap) OR bare list.
-    if isinstance(x, dict):
-        x = x.get('result') or x.get('results') or []
-    if not isinstance(x, list):
-        return []
-    out = []
-    for r in x:
-        if isinstance(r, str):                          # element is a JSON string
-            try: r = json.loads(r)
-            except Exception: continue
-        if isinstance(r, dict) and set(r) == {'text'}:  # {'text': '<json string>'} wrapper
-            try: r = json.loads(r['text'])
-            except Exception: continue
-        if isinstance(r, dict):
-            out.append(r)
-    return out
-
-results = normalize(payload)
-
-best = {}
-uuids = {}
-for r in results:
-    if not isinstance(r, dict):
-        continue
-    ticker = r.get('ticker', '')
-    score = r.get('reranking_score', 0)
-    du = r.get('doc_uuid', '')
-    if du and du not in uuids.setdefault(ticker, []):
-        uuids[ticker].append(du)   # every distinct doc (cover + returned exhibits) for this ticker
-    if ticker not in best or score > best[ticker]['score']:
-        best[ticker] = {
-            'ticker': ticker,
-            'name': r.get('name', ''),
-            'score': score,
-            'date': r.get('filing_date', ''),
-            'filing_type': r.get('filing_type', ''),
-            'uri': r.get('meta_data', {}).get('source_uri', ''),
-            'chunks': r.get('meta_data', {}).get('total_chunks', ''),
-            'content': r.get('content', '')[:220]
-        }
-
-ranked = [v for v in sorted(best.values(), key=lambda x: -x['score']) if v['score'] > 0.01]
-print(f'{len(ranked)} tickers above threshold (showing top 15)')
-for v in ranked[:15]:
-    du_str = ', '.join(uuids.get(v['ticker'], []))
-    print('---')
-    print(f'Score: {v[\"score\"]:.4f} | {v[\"ticker\"]} | {v[\"name\"]}')
-    print(f'Filed: {v[\"date\"]} | {v[\"filing_type\"][:60]}')
-    print(f'URI: {v[\"uri\"][:120]}')
-    print(f'doc_uuids: {du_str} | chunks(best): {v[\"chunks\"]}')
-    print(f'Content: {v[\"content\"]}')
-    print()
-"
+```text
+python3 <skill-dir>/scripts/filing_artifact.py summarize --fetch --save <temporary-json-path>
 ```
 
-Keep the preview short (≤220 chars) — it is only used to band each name below, not to reproduce the filing.
+The helper prints no more than 15 accession-level bundle summaries with previews of at most 220 characters, one validated SEC source link per bundle, and explicit remaining-count metadata. Keep the temporary artifact outside the repository and delete it after the scan. If `truncated` is true, request another page with `--offset <offset + shown_count>` only when the first page is deficient or the user requested exhaustive coverage.
 
-Band each name from its first-pass snippet. Don't verify every name with extra searches — that pulls full chunks into context and is the biggest token cost. The one exception is **cover-page-only** names, handled below. Judge relevance, don't over-judge: when in doubt, include and flag rather than exclude.
+### Identity rules
 
-Three bands:
+- Use a returned exchange-qualified ticker as the primary company identity without modification.
+- Resolve a bare or missing ticker with `search_securities` only when one issuer match is unambiguous.
+- If unresolved, keep the filing under its CIK or bundle identity and skip stock/ratio enrichment.
+- Use CIK only as a secondary collision key. Never replace a valid ticker with CIK.
+- Use CIK plus SEC accession as the bundle identity; fall back to `doc_uuid` when no accession is available.
+- Normalize `8-K 10.2` into bundle form `8-K` and document designation `10.2`.
 
-- **Confirmed** — the snippet clearly shows the event: for management changes, a named person plus appoint / resign / depart / promote language, or an explicit "Item 5.02 … appointment/departure" naming a person. Include; tag `confirmed`; `flag: false`.
-- **Flagged** — positive score but the snippet is inconclusive after the light second look below (still no substantive event text). **Include it anyway**, tag `flagged`, set `flag: true`, and give a short `flagnote` saying why (e.g. "8-K carries only a press-release exhibit; subject not in retrieved text"). This surfaces plausible names without silently dropping them.
-- **Excluded** — the snippet is clearly an unrelated topic (e.g. a credit-agreement "Administrative Agent may resign", an agency/dealer agreement), or `reranking_score` ≤ ~0.02.
+### Classify bundles
 
-**Light second look (cover-page-only names).** When a name's best snippet is just the 8-K cover / front matter — registrant header, checkboxes, an "Item X.XX" heading with no substance, or a bare exhibit fragment — the first pass tells you nothing about the actual event. For these (and only these), take **one** cheap look before finalizing the band, so cards say something useful. Keep it lean:
+Classify from bounded previews before fetching more evidence:
 
-- Cap it to the top ~3–5 cover-page-only names by score that are plausibly on-topic and filed in the window. Skip clear off-topic names (band them Excluded straight away).
-- Take **one** scoped follow-up per name — never an open-ended search. Pick the tighter tool:
-  - **`search_in_documents`** (default, cheapest) — search inside that ticker's filing bundle using the **full `doc_uuids` list** the distiller prints for it (covers the main 8-K plus any exhibits that came back in the first pass): `search_in_documents(doc_uuids=[<all doc_uuids for the ticker>], queries=["<one tight topic query>"], results_per_query=3, delivery="inline")`. This intentionally small follow-up can stay inline and jumps straight to the event text.
-  - **Strict ticker + date `search_filings`** — the fallback when `search_in_documents` still finds only front matter, i.e. the substance sits in an exhibit that never surfaced in the first pass (so the distiller has no `doc_uuid` for it): `search_filings(ticker="<TICKER>.US", date_from="<filing date>", date_to="<filing date>", queries=["<one tight query>"], results_per_query=3, delivery="inline")`. The exact-date bound scopes it to that day's filing bundle instead of the ticker's whole history — **never run a ticker search without a date bound.**
-  - (To read a specific chunk you already know the location of, `get_document_content(doc_uuid, chunk_num)` works too, but the scoped searches above find the substance for you.)
-- Reclassify from the result: event now clear → **Confirmed** with a real one-line summary; still murky → keep **Flagged** with a sharper `flagnote`.
-- Stop as soon as you can classify — don't read whole documents or run all five queries here.
+- **Confirmed** — the preview clearly states the requested event. Include `confirmed` in bundle tags.
+- **Flagged** — plausible but inconclusive after the permitted second look. Include `flagged`, set `flag: true`, and provide a short reason.
+- **Excluded** — clearly unrelated. Do not enrich or render it.
 
-The dashboard renders flagged cards with an amber "⚑" badge and a `Flagged` filter, so confirmed and doubtful names are visually separated but both present.
+For only the top 3–5 plausible cover-page-only bundles, take one scoped second look. First select the bundle locally:
 
-**Full deep dive (only if the user asks about a specific company)** — go beyond the light look: run `search_in_documents` over that ticker's full `doc_uuids` list with the full `queries` set and a higher `results_per_query`; or a strict ticker + date `search_filings` (still date-bounded to the filing day) to sweep every co-filed exhibit; or browse the whole filing via `get_document_content` across multiple `chunk_num`s. Token-heavy, so reserve it for user-requested drill-downs.
-
----
-
-## Phase 2: Enrich with Market & Fundamental Data
-
-For each company that passes the filter, make the applicable calls below in parallel:
-
-**Text mode shortcut:** if the user asked for text output (no dashboard), you only need latest price, daily change, and the 1Y return — so call `get_stock_context` and **skip `get_financial_ratios`** (ratios, EPS dots, and description aren't shown in the text table). This saves one call per company.
-
-### 2a. get_stock_context
-
-```
-ticker: "<TICKER>.US"
-
-# Text mode
-fields: ["price", "returns"]
-
-# Dashboard mode
-fields: ["price", "returns", "description", "technicals", "earnings_history"]
+```text
+python3 <skill-dir>/scripts/filing_artifact.py select --artifact <temporary-json-path> --bundle <bundle-id>
 ```
 
-All companies in scope are US-listed (including ADRs), so always use the `.US` suffix. If the ticker doesn't resolve, run `search_securities` to confirm the correct `.US` symbol before retrying.
+Use the returned UUID batches in `search_in_documents` with one tight query and `results_per_query: 3`. Never send more than 20 UUIDs. Process that artifact through the helper and stop when classification is possible. The selected result includes an `evidence_location` with the exact matching `doc_uuid`, `chunk_num`, and `content_chars`; if the bounded evidence ends at a material boundary, retrieve only that known chunk.
 
-The result is compact Markdown headed by the company name and ticker. Read the `## Price` key/value line, the `## Returns` table and `To date:` line, and the selected `## Fundamentals` subsections; do not look for legacy JSON paths or headings. **`get_stock_context` may omit unavailable fields** (common for recent listings, thin-coverage names, or ADRs) — this is expected, not an error. For any absent value, set the corresponding DATA key to `"—"` (or omit optional keys like `rb`/`rc`) and carry on; never fabricate a value and never abort the company over a missing field.
+If the needed exhibit was absent, use one exact-ticker, exact-filing-date `search_filings` call with one tight query. Never run a ticker follow-up without a date bound.
 
-- **Price & daily change:** read the `Price:` and `Change:` groups.
-- **Returns** (the 5 entries in `r`, in order): **Daily** is the percentage in `Change:`; **WTD**, **MTD**, and **YTD** come from `To date:`; **1Y** is the `Cumulative` cell for the `1y`/`1Y` row in the Period table.
-- **Market cap:** read `Market cap:` from the Price line.
-- **52-week high/low:** read the `52w H/L:` group and combine it with the current price for range position.
-- **Volume today vs 52-week avg:** read the `Volume/52w avg:` group and compute the ratio.
-- **Beta:** read `Beta:` under `### Technicals`.
-- **Forward P/E:** read `Forward P/E:` from the Price line.
-- **Company description:** use the complete prose under `### Description` for the collapsible panel.
-- **EPS beat/miss streak:** use the last four source-ordered rows in the `### Earnings History` table and compare `EPS actual` with `EPS estimate` (beat = ✓, miss = ✗). This benchmark is the **consensus analyst estimate**, not management guidance; the dashboard labels it "vs Est" accordingly.
+For a user-requested company deep dive, search selected bundle documents with focused queries. Do not walk neighboring `chunk_num` values or fetch a whole document because a hit ends at a boundary. Retrieve a known chunk only when the final evidence requires it.
 
-### 2b. get_financial_ratios
+## 3. Enrich selected companies
 
-```
-ticker: "<TICKER>.US"
-year: <current_year - 1>   # most recent completed fiscal year
-period: "FY"
-fields: ["returnOnEquity", "returnOnInvestedCapital", "netDebtToEBITDA", "ebitdaMargin"]
+### Text mode
+
+Call `get_stock_context` once with all resolved `tickers` and `fields: ["price", "returns"]`. Skip ratios and descriptions. Create the same compact company-and-filing manifest used below, but include exactly one stock source from the response: `stock_context` for an inline batch or `stock_context_url` for an artifact. Feed it to:
+
+```text
+python3 <skill-dir>/scripts/build_dashboard.py --text --stock-cache <temporary-cache-path>
 ```
 
-If the call returns null or empty for `year - 1`, retry with `year - 2`. If a ratio is still unavailable, set its DATA key to `"—"` rather than leaving it blank. Likewise, if fewer than 4 quarters of EPS history exist, include only the quarters available (the dashboard pads/omits gracefully).
+Present only the returned rows in the table described below. This path handles either MCP response mode while keeping artifact contents out of model context. Delete the cache after the final result.
 
-Extract:
-- **ROE** (`returnOnEquity`) — format as %
-- **ROIC** (`returnOnInvestedCapital`) — format as %
-- **ND/EBITDA** (`netDebtToEBITDA`) — format as "x" multiple
-- **EBITDA margin** (`ebitdaMargin`) — format as %
+### Dashboard mode
 
----
+Read `methodology_financials`. Then:
 
-## Phase 3: Render the Dashboard
+1. For every resolved included company, call `get_financial_ratios` for the current year with `period: "FY"` and fields `returnOnEquity`, `returnOnInvestedCapital`, `netDebtToEBITDA`, and `ebitdaMargin`. On unavailable data, try the prior year and then one year earlier; stop at the first valid response.
+2. Call `get_stock_context` once with all resolved `tickers` and fields `price`, `returns`, `profile`, `description`, `technicals`, and `earnings_history`. The MCP may return either a compact inline batch or one shared artifact, depending on response size.
+3. Put the compact ratio responses and exactly one stock source in the dashboard manifest: `stock_context` for the complete inline batch or `stock_context_url` for the shared capability URL. Do not inspect an artifact payload.
 
-The dashboard UI lives in `dashboard.html` in the same directory as this SKILL.md (shown in the `<location>` tag above this skill's content — use that absolute path). **Read it once**, then in your `show_widget` call paste that template with `/* INJECT_DATA */` replaced by your DATA object. Do **not** read a saved/rendered `.html` file back into context afterward — you already have the template and DATA, so re-reading just doubles the template's token cost.
+The builder extracts only top-level company name, ticker, description, structured price/returns/technicals, date-keyed earnings history, and allowlisted profile fields. It discards database, user-note, executive, estimate, and other unused sections.
 
-### Step 1 — Build the DATA object
+The builder selects each company from the shared artifact by ticker, verifies fresh and cached stock identity, and verifies the ticker in every compact ratio response. A missing or failed ticker result keeps the filing card but omits enrichment. A stock ticker or secondary CIK mismatch reports `identity_mismatch`; a ratio ticker mismatch reports `ratio_identity_mismatch`. An unresolved issuer reports `unresolved` and is never fetched. Duplicate company records merge by qualified ticker, while unresolved issuers merge only by CIK or bundle identity; every filing requires a bundle ID, duplicate accession IDs merge, and conflicting or malformed bundles are omitted with `manifest_conflict`.
+
+The builder applies these rules:
+
+- Keep returns in five fixed positions: Daily, WTD, MTD, YTD, and 1Y. Use `null` for missing values; missing is never zero.
+- Sort earnings-history ISO date keys, select the latest four, and display them oldest-first. Actual above estimate is a beat; below is a miss; equal or missing is neutral.
+- Multiply ROE, ROIC, and EBITDA margin decimal fractions by 100 exactly once. Leave ND/EBITDA as a multiple.
+- Label ratios `FY<year>` plus the reported fiscal-year-end label when available. Do not infer an unavailable end date.
+- Preserve the complete description in the collapsible About panel without copying it into the narrative response.
+
+## 4. Build and render
+
+Create a compact manifest and feed it to `build_dashboard.py` on stdin. Do not interpolate it into Python or shell source. Use this shape:
 
 ```json
 {
-  "title": "<topic, e.g. Management Changes>",
-  "ftype": "<filing type label for the header, e.g. \"8-K\", \"10-K\", or \"8-K / 10-Q\">",
-  "range": "<date range, e.g. Jun 28–30, 2026>",
-  "stats": [["N", "Label"], ...],
-  "filters": [["all", "All (N)"], ["confirmed", "Confirmed (X)"], ["flagged", "Flagged (Y)"], ...],
-  "cos": [ <company objects — see schema below> ]
+  "title": "Management Changes",
+  "ftype": "8-K / 6-K",
+  "range": "Aug 5–6, 2026",
+  "filters": [["appointments", "Appointments"]],
+  "stock_context_url": "<single-use batch capability>",
+  "companies": [{
+    "ticker": "MSFT.US",
+    "name": "Microsoft Corporation",
+    "cik": "0000789019",
+    "exchange": "NASDAQ",
+    "ratios": {"ticker":"MSFT.US","year":2025,"period":"FY","ratios":{}},
+    "filings": [{
+      "id": "sec:0000789019:<accession>",
+      "ft": "8-K",
+      "fd": "Aug 6",
+      "fl": "https://www.sec.gov/Archives/...",
+      "tags": ["confirmed", "appointments"],
+      "flag": false,
+      "flagnote": "",
+      "ev": [["pill-in", "APPOINTMENT", "Person", "Role and effective date"]],
+      "docs": 2
+    }]
+  }]
 }
 ```
 
-Per-company schema (use these exact short keys):
+For an inline MCP response, replace `stock_context_url` with `"stock_context": {<complete ticker-keyed batch>}`. Never provide both keys.
 
-| Key | Value |
-|-----|-------|
-| `t` | Ticker symbol |
-| `bg` / `fg` | Badge background / foreground hex. Pick distinct colors per ticker, drawn from the dfin.pro brand palette so cards stay on-brand: deep navy (`#101923`, `#142231`, `#1d2935`) or brand-green (`#12ce5d`, `#0f9d49`, `#167247`) backgrounds with white (`#ffffff`) or pale-green (`#cae8d7`) foreground; the gold `#d2b90a` works as an occasional accent badge. |
-| `tags` | Space-separated filter tag IDs matching the `filters` array. Include `confirmed` or `flagged` (per the banding in 1d) plus any event-type tags. |
-| `flag` | `true` for a Flagged (doubtful) name — renders an amber "⚑" badge. Omit or `false` for Confirmed. |
-| `flagnote` | Short reason shown in the badge when `flag` is true, e.g. `"cover page only — may be a bylaws amendment"`. |
-| `n` | Full company name |
-| `s` | `"EXCHANGE · Sector"` e.g. `"NYSE · Apparel Retail"` — sector from `GicSector`/`GicSubIndustry`; exchange from the filing's Section 12(b) registration line, or just show the sector if the exchange isn't clear. |
-| `mc` | Market cap string e.g. `"$30.3B"` |
-| `b` | Beta string e.g. `"1.00"` |
-| `ev` | Events: `[["pill-class", "LABEL", "Subject", "detail text"], ...]`. For personnel events the subject is the person's name; for non-personnel events (M&A, debt, etc.) use the subject of the event (counterparty, facility, plan) — it renders as `**Subject** — detail`. |
-| `p` | Price string e.g. `"$28.79"` |
-| `pc` | Change string e.g. `"+$0.60 (+2.13%)"` |
-| `pp` | `true` if change is positive |
-| `r` | Returns: `[[value, is_positive], ...]` — 5 entries in order: Daily, WTD, MTD, YTD, 1Y. Values are numbers (percent). If the whole set is unavailable (e.g. a just-listed name), pass `[]` (the row renders blank) rather than zeros, which would show a misleading "0.0%". |
-| `lo` / `hi` / `cur` | 52w low, 52w high, current price (numbers) |
-| `rb` | Range badge text e.g. `"↓ Near 52W Low"` or `"★ 52W High"` — omit if neither |
-| `rc` | Range badge class: `"badge-low"` or `"badge-high"` |
-| `v` | Volume string e.g. `"15.1M"` |
-| `vr` | Volume ratio string e.g. `"1.75×"` |
-| `vh` | `true` if ratio > 1.5 (highlights the volume in dfin gold) |
-| `roe` / `roic` / `nd` / `em` / `pe` | Fundamental strings e.g. `"18.5%"`, `"-1.27×"`, `"19.5×"` |
-| `eps` | `[[beat, "pct"], ...]` — up to 4 entries oldest-first (fewer is fine); beat: `1`=beat `0`=miss `-1`=neutral/no data |
-| `fd` | Filing date string e.g. `"Jun 29"` |
-| `fl` | SEC filing URL |
-| `d` | Company description (1–3 sentences) |
+Run:
 
-Event pill classes:
-- Personnel: `pill-in` (green, appointment), `pill-out` (red, departure), `pill-promo` (blue, promotion), `pill-board` (purple, board/director), `pill-interim` (gray, interim)
-- Corporate events: `pill-deal` (indigo, M&A / agreements), `pill-debt` (orange, debt / credit / restructuring), `pill-spin` (amber, spin-off / separation), `pill-event` (slate, other material events)
-
-### Step 2 — Save, then render
-
-Do both in one pass, saving first so a saved copy exists even if the widget fails.
-
-**1. Save to disk (default).** Write the finished page to the **current working directory** as `filing-monitor-<topic-slug>-<YYYY-MM-DD>.html`, by injecting DATA into the template *on disk* — never echo the injected HTML to stdout or Read the saved file back (either reloads the whole page into context). Skip this step only if the user asked to render in-app without saving (e.g. "just show it, don't save"). Text mode has no HTML, so nothing to save.
-
-```bash
-python - <<'PY'
-import datetime, re, pathlib
-tmpl = pathlib.Path(r"<ABSOLUTE_PATH_TO>/dashboard.html").read_text(encoding="utf-8")   # from the <location> tag
-data = r'''
-<YOUR DATA OBJECT AS VALID JSON>
-'''
-topic = "<topic, e.g. management changes>"
-slug = re.sub(r'[^a-z0-9]+', '-', topic.lower()).strip('-')
-out = pathlib.Path(f"filing-monitor-{slug}-{datetime.date.today()}.html")
-out.write_text(tmpl.replace("/* INJECT_DATA */", data), encoding="utf-8")
-print("Saved", out.resolve())
-PY
+```text
+python3 <skill-dir>/scripts/build_dashboard.py --template <skill-dir>/dashboard.html --output <cwd>/filing-monitor-<topic>-<date>.html --stock-cache <temporary-cache-path>
 ```
 
-This costs only the small DATA payload (the template is read from disk, not context). Exporting later would re-materialize the whole page in context, so always save here rather than after the fact.
+The builder prints only the saved path, counts, and per-ticker status. If the shared artifact reports `refresh_required`, request one fresh batch for tickers not already in the temporary cache and rerun with the same cache. Delete the cache after the final build.
 
-**2. Render.** Call `show_widget` with the template (already read once) and `/* INJECT_DATA */` replaced by the same DATA object. Then note the saved path in one line of your summary.
+Rendering contract:
 
-**If rendering fails** — `show_widget` errors, the template can't be read, injection breaks, or the user reports the widget didn't render — don't fail the task. Fall back to **text mode** (see Presenting results) and print the same findings as a concise table. The saved `.html` from step 1, if written, is still valid — point the user to it.
+- If the host exposes `show_widget`, render the completed HTML as the primary result. Do not duplicate company details in prose. If the tool requires full HTML, materialize the page only once for that final call.
+- Otherwise use another verified HTML renderer when available.
+- Without a renderer, link the saved HTML and use the helper's `--text` mode for the text table.
+- On render failure, retain the saved HTML and fall back through the helper's `--text` mode.
+- Skip saving only when the user explicitly requests render-only output.
 
----
+The dashboard validates SEC HTTPS links, allowlists visual classes/colors, uses event listeners instead of inline handlers, filters nested bundles independently, and hides a company only when none of its bundles match.
 
-## Token efficiency
+## 5. Present results
 
-The costly moves are large tool results landing in context. Keep the scan lean:
+Read `output_guidelines` before presenting substantive results.
 
-- **Never dump the raw `search_filings` result into your reply.** Fetch the returned capability URL directly through the Phase 1d distiller and read only the distilled output; never print or load the complete artifact into context. Use inline delivery only for the explicitly small follow-ups above.
-- **Band from first-pass snippets; don't verify every name** (see 1d). Per-ticker searches return full chunks and are the biggest single cost. The one sanctioned exception is the capped "light second look" for cover-page-only names (top ~3–5, one follow-up each); the full multi-query / whole-document drill-down stays user-requested.
-- **Render in one pass.** Read `dashboard.html` once and inject inline in the `show_widget` call. Saving to disk (Phase 3 Step 2) is fine — it injects into the template on disk — but never Read the saved file back or echo its contents to stdout, which would put the whole page through context twice.
-- **Keep the distiller preview short** (≤220 chars/ticker, top ~15) and use the compact short DATA keys as defined — don't add verbose fields.
-- Dashboard mode uses one scoped `get_stock_context` call and one `get_financial_ratios` call per included company; text mode uses only its two-field stock-context call. Limiting the number of included companies through sensible banding remains the main cost lever.
+- **Dashboard:** state only the company and filing-bundle counts plus the single most significant event, render the widget, and link the saved file when applicable.
+- **Text:** show one row per filing bundle with `Ticker | Company | Event | Price (Δ) | 1Y | Filing`. Mark doubtful bundles `⚑ flagged`. Do not include descriptions, ratios, or EPS history.
+- **No matches:** say no relevant results were found and suggest a broader query or wider date range.
 
-## Presenting results
-
-Keep on-screen output concise. This constrains what you **print**, not how much you reason internally — do the full scan, banding, and checks as needed; just don't narrate every step or repeat data that's already shown elsewhere.
-
-**Do not duplicate details across the screen and the dashboard.** The per-company details live in exactly one place:
-
-- **Dashboard mode (default):** print only a 1–2 line headline — the count and the single most significant event (e.g. "5 companies found; most notable: AEO CFO departure"). Then render the dashboard. Do **not** also describe each company in prose — that doubles token cost for no benefit.
-- **Text mode (user opted out, or dashboard fallback):** skip `show_widget` and print a compact markdown table, one row per company, then stop. Columns:
-
-  | Ticker | Company | Event | Price (Δ) | 1Y | Filing |
-  |--------|---------|-------|-----------|-----|--------|
-
-  where **Event** = who + what changed (e.g. "Michael Mathias — EVP & CFO → advisory role, eff. Aug 3"), **Price (Δ)** = latest price with daily change (e.g. "$17.29 (+0.52%)"), **1Y** = trailing 1-year return, **Filing** = SEC link. Flag doubtful names inline with a "⚑ flagged" note in the Event cell. Omit descriptions, ratios, and EPS history — text mode is deliberately lean.
-
-If no genuinely relevant results are found, say so in one line and suggest broader queries or a wider date range.
+Never reproduce filing chunks, complete descriptions, artifact URLs, or dashboard details already shown elsewhere.

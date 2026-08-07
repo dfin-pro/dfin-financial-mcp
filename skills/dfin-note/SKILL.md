@@ -8,7 +8,7 @@ description: >-
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` and `agent_help(topic="methodology_notes")` once if not already read.
 
-DFin skill version: 0.1.5, updated 2026-08-05.
+DFin skill version: 0.1.6, updated 2026-08-07.
 
 Turn completed analysis or material news into one high-signal private note. Preserve durable insight rather than dumping a chat or summarizing an article mechanically.
 

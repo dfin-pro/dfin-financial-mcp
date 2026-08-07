@@ -1,12 +1,11 @@
 <style>
-/* dfin.pro brand palette — signature green + gold accents */
 :root{
-  --dfin-green:#12ce5d;       /* bright brand green — solid accents */
-  --dfin-green-deep:#0f9d49;  /* readable green for text/values on light */
-  --dfin-green-tint:#cae8d7;  /* light green chip background */
-  --dfin-green-ink:#0f7f3d;   /* green text on tint chips */
-  --dfin-gold-ink:#b8890a;    /* dfin gold, darkened for readable text */
-  --dfin-navy:#101923;        /* dfin dark navy */
+  --dfin-green:#12ce5d;
+  --dfin-green-deep:#0f9d49;
+  --dfin-green-tint:#cae8d7;
+  --dfin-green-ink:#0f7f3d;
+  --dfin-gold-ink:#b8890a;
+  --dfin-navy:#101923;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:transparent;color:var(--text-primary,#111);padding:16px;font-size:12px}
@@ -23,32 +22,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .fb.active{background:var(--text-primary,#111);color:#fff;border-color:var(--text-primary,#111)}
 .cards{display:flex;flex-direction:column;gap:10px}
 .card{background:var(--bg-secondary,#f9f9f9);border:1px solid var(--border-primary,#e8e8e8);border-radius:10px;overflow:hidden}
-.card.hidden{display:none}
+.card.hidden,.filing-bundle.hidden{display:none}
 .card-top{padding:12px 14px;display:grid;grid-template-columns:48px 1fr;gap:10px;align-items:start}
 .bdg{width:48px;height:48px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;letter-spacing:.3px;flex-shrink:0;margin-top:2px}
 .co-name{font-weight:600;font-size:13px;margin-bottom:1px}
-.co-sub{font-size:10px;color:var(--text-tertiary,#999);margin-bottom:6px}
-.flagbd{display:inline-block;background:#fef3c7;color:#92400e;font-size:9px;font-weight:600;padding:1px 6px;border-radius:4px;margin-bottom:6px}
-.pill{display:inline-flex;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;white-space:nowrap}
-.pill-in{background:var(--dfin-green-tint);color:var(--dfin-green-ink)}
-.pill-out{background:#fee2e2;color:#991b1b}
-.pill-promo{background:#dbeafe;color:#1e40af}
-.pill-board{background:#ede9fe;color:#5b21b6}
-.pill-spin{background:#fef3c7;color:#92400e}
-.pill-interim{background:#f3f4f6;color:#374151}
-.pill-deal{background:#e0e7ff;color:#3730a3}
-.pill-debt{background:#ffedd5;color:#9a3412}
-.pill-event{background:#e2e8f0;color:#334155}
-.ev-rows{display:flex;flex-direction:column;gap:3px}
-.ev-row{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:var(--text-secondary,#444);line-height:1.4}
-.ev-row strong{color:var(--text-primary,#111)}
+.co-sub{font-size:10px;color:var(--text-tertiary,#999)}
 .dvdr{height:1px;background:var(--border-primary,#e8e8e8);margin:0 14px}
 .stock-row{padding:10px 14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .price-block{min-width:90px}
 .price{font-size:17px;font-weight:700;line-height:1}
 .pc{font-size:11px;margin-top:2px;font-weight:500}
 .pos{color:var(--dfin-green-deep)}.neg{color:#b91c1c}
-.ret-tbl{display:flex;gap:3px}
+.ret-tbl{display:flex;gap:3px;flex-wrap:wrap}
 .ret-c{text-align:center;padding:3px 6px;border-radius:5px;min-width:44px}
 .rl{font-size:9px;color:var(--text-tertiary,#999);margin-bottom:1px;text-transform:uppercase;letter-spacing:.3px}
 .rv{font-size:11px;font-weight:600}
@@ -66,19 +51,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .vol-n{font-size:12px;font-weight:600}
 .vol-l{font-size:9px;color:var(--text-tertiary,#999)}
 .vol-hi{color:var(--dfin-gold-ink)}
-.fund-row{padding:8px 14px 10px;display:flex;align-items:center;flex-wrap:wrap}
+.fund-row{padding:8px 14px 10px;display:flex;align-items:center;flex-wrap:wrap;gap:0}
 .fi{padding:0 10px;border-right:1px solid var(--border-primary,#e0e0e0);text-align:center}
 .fi:first-child{padding-left:0}
-.fi .fl{font-size:9px;color:var(--text-tertiary,#999);text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px}
+.fi .fl,.eps-blk .fl{font-size:9px;color:var(--text-tertiary,#999);text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px}
 .fi .fv{font-size:12px;font-weight:600}
+.ratio-vintage{font-size:9px;color:var(--text-tertiary,#999);padding-left:10px}
 .eps-blk{padding:0 10px;text-align:center;border-right:1px solid var(--border-primary,#e0e0e0)}
 .eps-dots{display:flex;gap:3px;justify-content:center;margin-top:2px}
 .eps-dot{width:10px;height:10px;border-radius:50%}
 .ep-b{background:var(--dfin-green)}.ep-m{background:#dc2626}.ep-z{background:#9ca3af}
-.file-blk{margin-left:auto;display:flex;align-items:center;gap:8px;padding-left:10px}
-.file-dt{font-size:10px;color:var(--text-tertiary,#999)}
-.sec-lnk{font-size:10px;color:var(--text-secondary,#555);text-decoration:none;border:1px solid var(--border-primary,#ddd);padding:2px 7px;border-radius:4px}
+.filings{padding:10px 14px 12px;display:flex;flex-direction:column;gap:8px}
+.filing-bundle{background:var(--bg-primary,#fff);border:1px solid var(--border-primary,#e2e2e2);border-radius:8px;padding:9px 10px}
+.filing-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:6px}
+.form-bdg{background:var(--dfin-navy);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px}
+.file-dt,.doc-count{font-size:10px;color:var(--text-tertiary,#999)}
+.flagbd{display:inline-block;background:#fef3c7;color:#92400e;font-size:9px;font-weight:600;padding:1px 6px;border-radius:4px}
+.sec-lnk{margin-left:auto;font-size:10px;color:var(--text-secondary,#555);text-decoration:none;border:1px solid var(--border-primary,#ddd);padding:2px 7px;border-radius:4px}
 .sec-lnk:hover{background:var(--bg-secondary,#f4f4f4)}
+.source-missing{margin-left:auto;font-size:10px;color:var(--text-tertiary,#999)}
+.pill{display:inline-flex;padding:2px 7px;border-radius:20px;font-size:10px;font-weight:600;white-space:nowrap}
+.pill-in{background:var(--dfin-green-tint);color:var(--dfin-green-ink)}
+.pill-out{background:#fee2e2;color:#991b1b}
+.pill-promo{background:#dbeafe;color:#1e40af}
+.pill-board{background:#ede9fe;color:#5b21b6}
+.pill-spin{background:#fef3c7;color:#92400e}
+.pill-interim{background:#f3f4f6;color:#374151}
+.pill-deal{background:#e0e7ff;color:#3730a3}
+.pill-debt{background:#ffedd5;color:#9a3412}
+.pill-event{background:#e2e8f0;color:#334155}
+.ev-rows{display:flex;flex-direction:column;gap:3px}
+.ev-row{display:flex;align-items:flex-start;gap:6px;font-size:11px;color:var(--text-secondary,#444);line-height:1.4}
+.ev-row strong{color:var(--text-primary,#111)}
 details{border-top:1px solid var(--border-primary,#e8e8e8)}
 details summary{padding:7px 14px;font-size:11px;font-weight:600;color:var(--text-secondary,#555);cursor:pointer;list-style:none;display:flex;align-items:center;gap:5px;user-select:none}
 details summary::before{content:'▶';font-size:8px;transition:transform .2s;display:inline-block}
@@ -89,147 +93,223 @@ details summary::-webkit-details-marker{display:none}
 
 <div id="root"></div>
 
+<script id="dashboard-data" type="application/json">/* INJECT_DATA */</script>
 <script>
-const DATA = /* INJECT_DATA */;
+'use strict';
 
 const RL = ['Daily','WTD','MTD','YTD','1Y'];
+const PILL_CLASSES = new Set([
+  'pill-in','pill-out','pill-promo','pill-board','pill-interim',
+  'pill-deal','pill-debt','pill-spin','pill-event'
+]);
+const RANGE_CLASSES = new Set(['badge-low','badge-high']);
+const BADGE_BACKGROUNDS = new Set([
+  '#101923','#142231','#1d2935','#12ce5d','#0f9d49','#167247','#d2b90a'
+]);
+const BADGE_FOREGROUNDS = new Set(['#ffffff','#cae8d7']);
+const TAG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
-function num(x) { return typeof x === 'number' && isFinite(x); }
+function num(x) { return typeof x === 'number' && Number.isFinite(x); }
 function esc(x) {
-  return String(x == null ? '' : x).replace(/[&<>"]/g,
-    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  return String(x == null ? '' : x).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-
-function renderCard(co) {
-  co = co || {};
-  const hasRange = num(co.lo) && num(co.hi) && num(co.cur) && co.hi > co.lo;
-  const rp = hasRange
-    ? Math.min(100, Math.max(0, ((co.cur - co.lo) / (co.hi - co.lo)) * 100)).toFixed(1)
-    : null;
-
-  const flagbadge = co.flag
-    ? `<div class="flagbd">⚑ ${esc(co.flagnote || 'Flagged — verify relevance')}</div>`
+function safeTags(value) {
+  return Array.isArray(value) ? [...new Set(value.filter(x => typeof x === 'string' && TAG_RE.test(x)))] : [];
+}
+function safePill(value) { return PILL_CLASSES.has(value) ? value : 'pill-event'; }
+function safeRangeClass(value) { return RANGE_CLASSES.has(value) ? value : ''; }
+function safeBadgeBackground(value) { return BADGE_BACKGROUNDS.has(value) ? value : '#101923'; }
+function safeBadgeForeground(value) { return BADGE_FOREGROUNDS.has(value) ? value : '#ffffff'; }
+function safeSecUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    const host = parsed.hostname.toLowerCase();
+    return parsed.protocol === 'https:' &&
+      (host === 'sec.gov' || host.endsWith('.sec.gov')) &&
+      !parsed.username && !parsed.password && (!parsed.port || parsed.port === '443')
+      ? parsed.href
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+function formatReturn(value) {
+  if (!num(value)) return {text:'—', cls:'rz'};
+  if (value === 0) return {text:'0.0%', cls:'rz'};
+  return {
+    text:`${value > 0 ? '+' : ''}${value.toFixed(1)}%`,
+    cls:value > 0 ? 'rp' : 'rn'
+  };
+}
+function renderEvents(events) {
+  return (Array.isArray(events) ? events : []).map(row => {
+    const [pill, label, subject, detail] = Array.isArray(row) ? row : [];
+    return `<div class="ev-row"><span class="pill ${safePill(pill)}">${esc(label || 'Event')}</span>` +
+      `<span><strong>${esc(subject)}</strong>${subject ? ' — ' : ''}${esc(detail)}</span></div>`;
+  }).join('');
+}
+function renderFiling(filing) {
+  filing = filing && typeof filing === 'object' ? filing : {};
+  const tags = safeTags(filing.tags);
+  const source = safeSecUrl(filing.fl);
+  const sourceMarkup = source
+    ? `<a class="sec-lnk" href="${esc(source)}" target="_blank" rel="noopener noreferrer">SEC ↗</a>`
+    : '<span class="source-missing">Source unavailable</span>';
+  const flag = filing.flag
+    ? `<span class="flagbd">⚑ ${esc(filing.flagnote || 'Flagged — verify relevance')}</span>`
     : '';
-
-  const evs = (co.ev || []).map(row => {
-    const [cls, lbl, person, detail] = row || [];
-    return `<div class="ev-row"><span class="pill ${esc(cls)}">${esc(lbl)}</span><span><strong>${esc(person)}</strong> — ${esc(detail)}</span></div>`;
-  }).join('');
-
-  const rets = (co.r || []).map((row, i) => {
-    const [v, pos] = row || [];
-    const c = v === 0 ? 'rz' : pos ? 'rp' : 'rn';
-    const f = v === 0 ? '0.0%' : `${pos ? '+' : ''}${Math.abs(num(v) ? v : 0).toFixed(1)}%`;
-    return `<div class="ret-c ${c}"><div class="rl">${RL[i] || ''}</div><div class="rv">${f}</div></div>`;
-  }).join('');
-
-  const eps = (co.eps || []).map(row => {
-    const [b, t] = row || [];
-    return `<div class="eps-dot ${b === 1 ? 'ep-b' : b === 0 ? 'ep-m' : 'ep-z'}" title="${esc(t)}"></div>`;
-  }).join('');
-
-  const rbadge = co.rb
-    ? `<span class="rng-bd ${esc(co.rc)}">${esc(co.rb)}</span>`
-    : hasRange
-      ? `<span style="font-size:9px;color:#888">${rp}% of 52W range</span>`
-      : '';
-
-  const rngBlock = hasRange
-    ? `<div class="rng-blk">
-      <div class="rng-lbl"><span>$${co.lo.toFixed(2)}</span><span>$${co.hi.toFixed(2)}</span></div>
-      <div class="rng-bar"><div class="rng-mrk" style="left:${rp}%"></div></div>
-      <div style="margin-top:4px">${rbadge}</div>
-    </div>`
-    : `<div class="rng-blk"><div class="rng-lbl"><span>52W range</span><span>—</span></div></div>`;
-
-  return `
-<div class="card" data-tags="${esc(co.tags || '')}">
-  <div class="card-top">
-    <div class="bdg" style="background:${esc(co.bg || 'var(--bg-secondary,#eee)')};color:${esc(co.fg || 'var(--text-primary,#111)')}">${esc(co.t)}</div>
-    <div>
-      <div class="co-name">${esc(co.n)}</div>
-      <div class="co-sub">${esc(co.s)}</div>
-      ${flagbadge}
-      <div class="ev-rows">${evs}</div>
+  const docs = Number.isInteger(filing.docs) && filing.docs > 0
+    ? `<span class="doc-count">${filing.docs} document${filing.docs === 1 ? '' : 's'}</span>`
+    : '';
+  return `<section class="filing-bundle" data-tags="${esc(tags.join(' '))}">
+    <div class="filing-head">
+      <span class="form-bdg">${esc(filing.ft || 'Filing')}</span>
+      <span class="file-dt">Filed ${esc(filing.fd || '—')}</span>
+      ${docs}${flag}${sourceMarkup}
     </div>
-  </div>
-  <div class="dvdr"></div>
-  <div class="stock-row">
-    <div class="price-block">
-      <div class="price">${esc(co.p || '—')}</div>
-      <div class="pc ${co.pp ? 'pos' : 'neg'}">${esc(co.pc || '')}</div>
-      <div style="font-size:9px;color:#888;margin-top:3px">Mkt Cap ${esc(co.mc || '—')} · β ${esc(co.b || '—')}</div>
-    </div>
-    <div class="ret-tbl">${rets}</div>
-    ${rngBlock}
-    <div class="vol-blk">
-      <div class="vol-n ${co.vh ? 'vol-hi' : ''}">${esc(co.v || '—')}</div>
-      <div class="vol-l">${co.vr ? esc(co.vr) + ' avg vol' : ''}</div>
-    </div>
-  </div>
-  <div class="dvdr"></div>
-  <div class="fund-row">
-    <div class="fi"><div class="fl">ROE</div><div class="fv">${esc(co.roe || '—')}</div></div>
-    <div class="fi"><div class="fl">ROIC</div><div class="fv">${esc(co.roic || '—')}</div></div>
-    <div class="fi"><div class="fl">ND/EBITDA</div><div class="fv">${esc(co.nd || '—')}</div></div>
-    <div class="fi"><div class="fl">EBITDA Mgn</div><div class="fv">${esc(co.em || '—')}</div></div>
-    <div class="fi"><div class="fl">Fwd P/E</div><div class="fv">${esc(co.pe || '—')}</div></div>
-    <div class="eps-blk">
-      <div class="fl">EPS vs Est (4Q)</div>
-      <div class="eps-dots">${eps}</div>
-    </div>
-    <div class="file-blk">
-      <span class="file-dt">Filed ${esc(co.fd || '—')}</span>
-      <a class="sec-lnk" href="${esc(co.fl || '#')}" target="_blank">SEC ↗</a>
-    </div>
-  </div>
-  <details>
-    <summary>About ${esc(co.n)}</summary>
-    <div class="desc">${esc(co.d || 'No description available.')}</div>
-  </details>
-</div>`;
+    <div class="ev-rows">${renderEvents(filing.ev)}</div>
+  </section>`;
 }
-
-function render() {
-  const D = (typeof DATA === 'object' && DATA) ? DATA : {};
-  const title = esc(D.title || 'Filing Monitor');
-  const range = esc(D.range || '');
-  const ftype = esc(D.ftype || '8-K');
-  const stats = Array.isArray(D.stats) ? D.stats : [];
-  const filters = Array.isArray(D.filters) ? D.filters : [];
-  const cos = Array.isArray(D.cos) ? D.cos : [];
-
-  const body = cos.length
-    ? `<div class="cards">${cos.map(renderCard).join('')}</div>`
-    : `<div style="padding:24px 4px;color:var(--text-tertiary,#888);font-size:12px">No companies matched. Try a broader topic or a wider date range.</div>`;
-
-  document.getElementById('root').innerHTML =
-    `<div class="hdr"><div><div class="hdr-title">${title}</div>` +
-    `<div class="hdr-meta">${ftype} filings · ${range} · SEC EDGAR</div></div></div>` +
-    `<div class="chips">${stats.map(row => {
-      const [n, l] = row || [];
-      return `<div class="chip"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
-    }).join('')}</div>` +
-    `<div class="filters">${filters.map((row, i) => {
-      const [id, lbl] = row || [];
-      return `<button class="fb${i === 0 ? ' active' : ''}" onclick="filter('${esc(id)}',this)">${esc(lbl)}</button>`;
-    }).join('')}</div>` +
-    body;
+function renderReturns(values) {
+  const row = Array.isArray(values) ? values.slice(0, 5) : [];
+  while (row.length < 5) row.push(null);
+  return row.map((value, index) => {
+    const formatted = formatReturn(value);
+    return `<div class="ret-c ${formatted.cls}"><div class="rl">${RL[index]}</div>` +
+      `<div class="rv">${formatted.text}</div></div>`;
+  }).join('');
 }
-
-function filter(tag, btn) {
-  document.querySelectorAll('.fb').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+function renderRange(company) {
+  const hasRange = num(company.lo) && num(company.hi) && num(company.cur) && company.hi > company.lo;
+  if (!hasRange) return '';
+  const position = Math.min(100, Math.max(0, ((company.cur - company.lo) / (company.hi - company.lo)) * 100));
+  const rangeClass = safeRangeClass(company.rc);
+  const label = company.rb
+    ? `<span class="rng-bd ${rangeClass}">${esc(company.rb)}</span>`
+    : `<span style="font-size:9px;color:#888">${position.toFixed(1)}% of 52W range</span>`;
+  return `<div class="rng-blk">
+    <div class="rng-lbl"><span>$${company.lo.toFixed(2)}</span><span>$${company.hi.toFixed(2)}</span></div>
+    <div class="rng-bar"><div class="rng-mrk" style="left:${position.toFixed(1)}%"></div></div>
+    <div style="margin-top:4px">${label}</div>
+  </div>`;
+}
+function renderFundamentals(company) {
+  const ratioFields = [
+    ['ROE', company.roe], ['ROIC', company.roic], ['ND/EBITDA', company.nd],
+    ['EBITDA Mgn', company.em]
+  ];
+  const fields = [...ratioFields, ['Fwd P/E', company.pe]];
+  const availableFields = fields.filter(([, value]) => value && value !== '—');
+  const availableRatios = ratioFields.filter(([, value]) => value && value !== '—');
+  const eps = Array.isArray(company.eps) ? company.eps : [];
+  if (availableFields.length === 0 && eps.length === 0) return '';
+  const metrics = availableFields.map(([label, value]) =>
+    `<div class="fi"><div class="fl">${esc(label)}</div><div class="fv">${esc(value)}</div></div>`
+  ).join('');
+  const dots = eps.map(row => {
+    const [beat, title] = Array.isArray(row) ? row : [];
+    const cls = beat === 1 ? 'ep-b' : beat === 0 ? 'ep-m' : 'ep-z';
+    return `<div class="eps-dot ${cls}" title="${esc(title)}"></div>`;
+  }).join('');
+  const epsBlock = eps.length
+    ? `<div class="eps-blk"><div class="fl">EPS vs Est (4Q)</div><div class="eps-dots">${dots}</div></div>`
+    : '';
+  const vintage = availableRatios.length && company.rvintage
+    ? `<span class="ratio-vintage">${esc(company.rvintage)}</span>`
+    : '';
+  return `<div class="dvdr"></div><div class="fund-row">${metrics}${epsBlock}${vintage}</div>`;
+}
+function renderCard(company) {
+  company = company && typeof company === 'object' ? company : {};
+  const returns = Array.isArray(company.r) && company.r.some(num)
+    ? `<div class="ret-tbl">${renderReturns(company.r)}</div>`
+    : '';
+  const volume = company.v && company.v !== '—'
+    ? `<div class="vol-blk"><div class="vol-n ${company.vh ? 'vol-hi' : ''}">${esc(company.v)}</div>` +
+      `<div class="vol-l">${company.vr ? esc(company.vr) + ' avg vol' : ''}</div></div>`
+    : '';
+  const changeClass = company.pp === true ? 'pos' : company.pp === false ? 'neg' : '';
+  const hasPrice = (company.p && company.p !== '—') || company.pc ||
+    (company.mc && company.mc !== '—') || (company.b && company.b !== '—');
+  const price = hasPrice
+    ? `<div class="price-block"><div class="price">${esc(company.p || '—')}</div>
+        <div class="pc ${changeClass}">${esc(company.pc || '')}</div>
+        <div style="font-size:9px;color:#888;margin-top:3px">Mkt Cap ${esc(company.mc || '—')} · β ${esc(company.b || '—')}</div>
+      </div>`
+    : '';
+  const range = renderRange(company);
+  const stockContents = `${price}${returns}${range}${volume}`;
+  const stockBlock = stockContents
+    ? `<div class="dvdr"></div><div class="stock-row">${stockContents}</div>`
+    : '';
+  const filings = (Array.isArray(company.fs) ? company.fs : []).map(renderFiling).join('');
+  const description = company.d
+    ? `<details><summary>About ${esc(company.n)}</summary><div class="desc">${esc(company.d)}</div></details>`
+    : '';
+  return `<article class="card">
+    <div class="card-top">
+      <div class="bdg" style="background:${safeBadgeBackground(company.bg)};color:${safeBadgeForeground(company.fg)}">${esc(company.t)}</div>
+      <div><div class="co-name">${esc(company.n)}</div><div class="co-sub">${esc(company.s)}</div></div>
+    </div>
+    ${stockBlock}
+    ${renderFundamentals(company)}
+    <div class="dvdr"></div><div class="filings">${filings}</div>${description}
+  </article>`;
+}
+function applyFilter(tag, button) {
+  document.querySelectorAll('.fb').forEach(node => node.classList.remove('active'));
+  if (button) button.classList.add('active');
   document.querySelectorAll('.card').forEach(card => {
-    const tags = (card.dataset.tags || '').split(' ');
-    card.classList.toggle('hidden', tag !== 'all' && !tags.includes(tag));
+    let visible = 0;
+    card.querySelectorAll('.filing-bundle').forEach(bundle => {
+      const tags = String(bundle.dataset.tags || '').split(' ').filter(Boolean);
+      const show = tag === 'all' || tags.includes(tag);
+      bundle.classList.toggle('hidden', !show);
+      if (show) visible += 1;
+    });
+    card.classList.toggle('hidden', visible === 0);
   });
 }
+function wireFilters() {
+  document.querySelectorAll('.fb').forEach(button => {
+    button.addEventListener('click', () => applyFilter(button.dataset.filter || 'all', button));
+  });
+}
+function loadData() {
+  const node = document.getElementById('dashboard-data');
+  const parsed = JSON.parse(node ? node.textContent : '{}');
+  return parsed && typeof parsed === 'object' ? parsed : {};
+}
+function render() {
+  const data = loadData();
+  const stats = Array.isArray(data.stats) ? data.stats : [];
+  const filters = Array.isArray(data.filters) ? data.filters : [];
+  const companies = Array.isArray(data.cos) ? data.cos : [];
+  const body = companies.length
+    ? `<div class="cards">${companies.map(renderCard).join('')}</div>`
+    : '<div style="padding:24px 4px;color:var(--text-tertiary,#888);font-size:12px">No companies matched. Try a broader topic or wider date range.</div>';
+  const filterButtons = filters.map((row, index) => {
+    const [id, label] = Array.isArray(row) ? row : [];
+    const safeId = typeof id === 'string' && TAG_RE.test(id) ? id : 'all';
+    return `<button class="fb${index === 0 ? ' active' : ''}" data-filter="${esc(safeId)}">${esc(label)}</button>`;
+  }).join('');
+  const root = document.getElementById('root');
+  root.innerHTML = `<div class="hdr"><div><div class="hdr-title">${esc(data.title || 'Filing Monitor')}</div>` +
+    `<div class="hdr-meta">${esc(data.ftype || '8-K / 6-K')} filings · ${esc(data.range || '')} · SEC EDGAR</div></div></div>` +
+    `<div class="chips">${stats.map(row => {
+      const [value, label] = Array.isArray(row) ? row : [];
+      return `<div class="chip"><div class="n">${esc(value)}</div><div class="l">${esc(label)}</div></div>`;
+    }).join('')}</div><div class="filters">${filterButtons}</div>${body}`;
+  wireFilters();
+}
+
+globalThis.DFinFilingMonitor = {applyFilter,formatReturn,renderCard,safeSecUrl,safeTags};
 
 try {
   render();
-} catch (e) {
+} catch (error) {
   document.getElementById('root').innerHTML =
-    `<div style="padding:24px 4px;color:#b91c1c;font-size:12px">Could not render the dashboard (${esc(e && e.message)}). The underlying data may be malformed.</div>`;
+    `<div style="padding:24px 4px;color:#b91c1c;font-size:12px">Could not render the dashboard (${esc(error && error.message)}). The underlying data may be malformed.</div>`;
 }
 </script>
