@@ -24,34 +24,40 @@ Read [references/news.md](references/news.md) for every news note and whenever o
 ## Core Workflow
 
 1. Follow the selected mode reference and any applicable article-source guidance to acquire evidence and select material content.
-2. Collect source identifiers and all materially affected exchange-qualified tickers. Do not add tangential securities.
+2. Collect source identifiers, exact document chunks used as evidence, and all materially affected exchange-qualified tickers. Do not add tangential securities.
 3. Discover related prior research.
-    - Call `search_notes` to find relevant existing user notes, reading `agent_help(topic="methodology_search")` first if needed.
-    - Use `find_linked_notes` when a known note, ticker, or report may expose relevant connections. Omit the query for structural proximity; reuse or refine the research query when relevance ordering is more useful.
+    - Read `agent_help(topic="methodology_search")` once before the first `search_notes` call, if it has not already been read, then call `search_notes` to find relevant existing user notes.
+    - Use `find_linked_notes` when a known note, ticker, report, transcript, or permanent document UUID may expose relevant connections. Omit the query for structural proximity; reuse or refine the research query when relevance ordering is more useful.
     - Keep graph exploration bounded: start from the strongest seed, then re-seed at most twice when a result opens a distinct branch relevant to the saved conclusion. Prefer `max_hops=1` for follow-ups and stop sooner if no materially new candidates appear. Do not recursively expand results or exhaust pagination unless the user requests broader research.
     - Deduplicate overlapping discoveries by `note_id`.
     - Use `get_note` when complete content is needed to compare a candidate or decide whether to link it.
 4. Draft a concise, distinctive subject and self-standing Markdown body using only the mode elements that materially improve the note. Do not put company names or tickers in the subject.
 5. Compare the draft with relevant existing user notes and DFin reports. Point out material support, contradiction, or potentially stale prior research to the user. If a contradiction would change the saved conclusion or intended relationships, ask the user to resolve it before creation. Otherwise, include the material comparison in the note and proceed.
-6. Call `create_note` with the selected category, drafted subject and body, all material tickers, and only note or report relationships materially relevant to the saved conclusion.
+6. Call `create_note` with the selected category, drafted subject and body, all material tickers, and only note, report, transcript, or raw-document relationships materially relevant to the saved conclusion.
 7. Report the created note's `note_id`, category, subject, linked tickers, and any omitted or uncertain references. Present `url` as the direct link for opening the formatted note.
 
 ## Reference Placement
 
-Use the note body for external source references and the note tool fields for structured ticker, same-user note, and DFin stock analysis report relationships.
+### User-Facing Body Links
 
-- Put filing and transcript `doc_uuid` values and used SEC links in the body. Do not put filing or transcript IDs in `linked_note_ids`.
-- For selected DFin stock analysis report relationships, follow the report-identifier flow in the notes methodology and put each resolved `report_id` in `linked_report_ids`. Do not recurse through sources used to build a DFin report.
-- Put relevant same-user note IDs in `linked_note_ids` and explain their role in the body.
-- When referring to a related note or DFin report in the body, retrieve its canonical URL with `get_note` or `get_report_details` and write a Markdown link whose descriptive text identifies the relevant research. Do not present a bare `note_id` or `report_id` as the user-facing reference; keep IDs in `linked_note_ids` and `linked_report_ids`. Never invent a URL when the canonical URL is unavailable.
-- Put stable material web URLs in the body.
-- Label useful claims with missing source identifiers as thread-derived; never invent identifiers or URLs.
+- Write every available URL as a natural Markdown link whose descriptive text names the source or explains its relevance. Do not print a bare URL or expose a `note_id`, `report_id`, `transcript_id`, or `doc_uuid` in the body.
+- Link SEC filings to the returned SEC `source_uri`, transcripts to their dfin.pro `source_uri`, related notes to their canonical Notebook URLs from `get_note`, and DFin reports to their canonical URLs from `get_report_details`.
+- Link stable external sources with descriptive text. If a canonical or stable URL is unavailable, identify the source without inventing a URL. Label useful claims without a retrievable source as thread-derived.
+
+### Structured Agent References
+
+- Put materially relevant note IDs in `linked_note_ids`, DFin report IDs in `linked_report_ids`, and transcript IDs in `linked_transcript_ids`.
+- Put other permanent indexed filing or source evidence in `linked_document_references` as objects containing `doc_uuid` and optional `chunk_num`, retaining the exact supporting chunk when one was used.
+- Do not invent or generate any ids yourself.
+- Prefer typed report and transcript relationships and do not duplicate them as raw document references. Never save a temporary `temp_` document UUID or derive an identifier from a URL. Follow the notes methodology for chunk provenance and later revalidation.
+- Put materially affected exchange-qualified tickers in `tickers`.
+- Explain each relationship's relevance through its natural body link. Do not recurse through sources used to build a DFin report.
 
 ## Quality Bar
 
 - Make the note understandable without reopening the original chat or article.
 - Write the body as valid Markdown. Use headings, paragraphs, lists, tables, emphasis, and links only when they improve readability; never leave placeholder text or empty headings.
 - Stay faithful to the supplied material and completed analysis. Distinguish reported facts, company or source claims, calculations, and fresh inference; clearly label new conclusions as fresh inference and cite their supporting evidence.
-- Keep citations and source identifiers close to the claims they support.
+- Keep readable body citations close to the claims they support, and retain machine identifiers and evidence locations only in structured note fields.
 - Keep the scope proportionate. Omit long copied passages, routine background, unrelated tool logs, prompt chatter, and mechanical steps. Never save secrets, API keys, credentials, or unrelated private conversation.
 - For complex work in either mode, read `agent_help(topic="output_guidelines")` once before drafting if not already read. Complex work includes multi-source synthesis, material calculations or reconciliations, peer comparisons, thesis or valuation judgments, or substantial tables or charts. Do not load it for routine capture.
