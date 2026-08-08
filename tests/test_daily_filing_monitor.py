@@ -156,6 +156,7 @@ def _stock_payload():
 def _stock_batch(payload=None, ticker="MSFT.US"):
     payload = _stock_payload() if payload is None else payload
     return {
+        "format": "inline",
         "count": 1,
         "success_count": 1,
         "error_count": 0,
@@ -533,6 +534,19 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(data["stats"][0], [1, "Companies"])
         self.assertEqual(data["stats"][1], [1, "Filing bundles"])
 
+    def test_artifact_payload_does_not_require_inline_format_marker(self):
+        batch = _stock_batch()
+        batch.pop("format")
+
+        data, statuses, cache = BUILDER.build_data(
+            _manifest(),
+            stock_fetcher=lambda _url: batch,
+        )
+
+        self.assertEqual(statuses, [{"ticker": "MSFT.US", "stock_context": "ok"}])
+        self.assertEqual(data["cos"][0]["p"], "$499.86")
+        self.assertEqual(set(cache), {"MSFT.US"})
+
     def test_uses_allowlisted_cache_without_refetching(self):
         cached = BUILDER.extract_stock_fields(_stock_payload())
         manifest = _manifest(stock_url=None)
@@ -549,76 +563,214 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(data["cos"][0]["d"], cached["description"])
         self.assertEqual(cache, {"MSFT.US": cached})
 
-    def test_fresh_ticker_mismatch_keeps_filings_and_omits_enrichment(self):
+    def test_fresh_ticker_mismatch_fails_loudly(self):
         payload = _stock_payload()
         payload["ticker"] = "AAPL.US"
 
-        data, statuses, cache = BUILDER.build_data(
-            _manifest(),
-            stock_fetcher=lambda _url: _stock_batch(payload),
-        )
-        company = data["cos"][0]
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "Stock context identity mismatch for MSFT.US",
+        ):
+            BUILDER.build_data(
+                _manifest(),
+                stock_fetcher=lambda _url: _stock_batch(payload),
+            )
 
-        self.assertEqual(statuses[0]["stock_context"], "identity_mismatch")
-        self.assertEqual(company["t"], "MSFT.US")
-        self.assertEqual(len(company["fs"]), 1)
-        self.assertEqual(company["p"], "—")
-        self.assertEqual(company["d"], "")
-        self.assertEqual(company["roe"], "—")
-        self.assertEqual(cache, {})
-
-    def test_cached_ticker_mismatch_is_removed_without_consuming_fresh_url(self):
+    def test_cached_ticker_mismatch_is_evicted_and_refetched(self):
         cached = BUILDER.extract_stock_fields(_stock_payload())
         cached["ticker"] = "AAPL.US"
         calls = []
 
-        _data, statuses, cache = BUILDER.build_data(
+        data, statuses, cache = BUILDER.build_data(
             _manifest(),
             stock_cache={"MSFT.US": cached},
-            stock_fetcher=lambda url: calls.append(url),
+            stock_fetcher=lambda url: (calls.append(url), _stock_batch())[1],
         )
 
-        self.assertEqual(calls, [])
-        self.assertEqual(statuses[0]["stock_context"], "identity_mismatch")
-        self.assertEqual(cache, {})
+        self.assertEqual(
+            calls,
+            ["https://www.dfin.pro/api/v1/artifacts/Stock123"],
+        )
+        self.assertEqual(statuses[0]["stock_context"], "ok")
+        self.assertEqual(data["cos"][0]["p"], "$499.86")
+        self.assertEqual(set(cache), {"MSFT.US"})
 
-    def test_cik_mismatch_omits_enrichment(self):
+    def test_cached_cik_mismatch_is_evicted_and_refetched(self):
+        cached = BUILDER.extract_stock_fields(_stock_payload())
+        cached["cik"] = "0000320193"
+        calls = []
         manifest = _manifest()
-        manifest["companies"][0]["cik"] = "0000000001"
+        manifest["companies"][0]["cik"] = "0000789019"
 
         data, statuses, cache = BUILDER.build_data(
             manifest,
-            stock_fetcher=lambda _url: _stock_batch(),
+            stock_cache={"MSFT.US": cached},
+            stock_fetcher=lambda url: (calls.append(url), _stock_batch())[1],
         )
 
-        self.assertEqual(statuses[0]["stock_context"], "identity_mismatch")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(statuses[0]["stock_context"], "ok")
+        self.assertEqual(data["cos"][0]["p"], "$499.86")
+        self.assertEqual(cache["MSFT.US"]["cik"], "0000789019")
+
+    def test_cached_malformed_cik_is_evicted_and_refetched(self):
+        cached = BUILDER.extract_stock_fields(_stock_payload())
+        cached["cik"] = "bad-cik"
+        calls = []
+
+        data, statuses, cache = BUILDER.build_data(
+            _manifest(),
+            stock_cache={"MSFT.US": cached},
+            stock_fetcher=lambda url: (calls.append(url), _stock_batch())[1],
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(statuses[0]["stock_context"], "ok")
+        self.assertEqual(data["cos"][0]["p"], "$499.86")
+        self.assertEqual(cache["MSFT.US"]["cik"], "0000789019")
+
+    def test_invalid_cache_with_refresh_required_remains_retryable(self):
+        cached = BUILDER.extract_stock_fields(_stock_payload())
+        cached["ticker"] = "AAPL.US"
+
+        def refresh_required(_url):
+            raise BUILDER.ArtifactRefreshRequired("request one fresh URL")
+
+        data, statuses, cache = BUILDER.build_data(
+            _manifest(),
+            stock_cache={"MSFT.US": cached},
+            stock_fetcher=refresh_required,
+        )
+
+        self.assertEqual(statuses[0]["stock_context"], "refresh_required")
         self.assertEqual(data["cos"][0]["p"], "—")
         self.assertEqual(cache, {})
 
-    def test_ratio_ticker_mismatch_omits_ratios_and_reports_status(self):
+    def test_invalid_cache_without_fresh_source_fails_loudly(self):
+        cached = BUILDER.extract_stock_fields(_stock_payload())
+        cached["ticker"] = "AAPL.US"
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "identity mismatch and no fresh source.*MSFT.US",
+        ):
+            BUILDER.build_data(
+                _manifest(stock_url=None),
+                stock_cache={"MSFT.US": cached},
+            )
+
+    def test_cik_mismatch_fails_loudly(self):
+        manifest = _manifest()
+        manifest["companies"][0]["cik"] = "0000000001"
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "Stock context identity mismatch for MSFT.US",
+        ):
+            BUILDER.build_data(
+                manifest,
+                stock_fetcher=lambda _url: _stock_batch(),
+            )
+
+    def test_malformed_supplied_stock_cik_fails_loudly(self):
+        payload = _stock_payload()
+        payload["profile"]["cik"] = "bad-cik"
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "Stock context identity mismatch for MSFT.US",
+        ):
+            BUILDER.build_data(
+                _manifest(),
+                stock_fetcher=lambda _url: _stock_batch(payload),
+            )
+
+    def test_ratio_ticker_mismatch_fails_loudly(self):
         manifest = _manifest(stock_url=None)
         manifest["companies"][0]["ratios"]["ticker"] = "AAPL.US"
 
-        data, statuses, _cache = BUILDER.build_data(manifest)
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "Financial-ratio identity mismatch for MSFT.US",
+        ):
+            BUILDER.build_data(manifest)
 
-        self.assertEqual(data["cos"][0]["roe"], "—")
-        self.assertEqual(data["cos"][0]["rvintage"], "")
-        self.assertEqual(
-            statuses[0]["ratio_context"],
-            "ratio_identity_mismatch",
-        )
-
-    def test_ratio_payload_without_ticker_is_not_accepted(self):
+    def test_ratio_payload_without_ticker_fails_loudly(self):
         manifest = _manifest(stock_url=None)
         manifest["companies"][0]["ratios"].pop("ticker")
 
-        data, statuses, _cache = BUILDER.build_data(manifest)
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "Financial-ratio identity mismatch for MSFT.US",
+        ):
+            BUILDER.build_data(manifest)
 
-        self.assertEqual(data["cos"][0]["roe"], "—")
-        self.assertEqual(
-            statuses[0]["ratio_context"],
-            "ratio_identity_mismatch",
-        )
+    def test_falsey_non_object_ratio_payload_fails_loudly(self):
+        for ratios in ([], "", 0, False):
+            with self.subTest(ratios=ratios):
+                manifest = _manifest(stock_url=None)
+                manifest["companies"][0]["ratios"] = ratios
+
+                with self.assertRaisesRegex(
+                    BUILDER.HelperError,
+                    "Financial-ratio identity mismatch for MSFT.US",
+                ):
+                    BUILDER.build_data(manifest)
+
+    def test_every_duplicate_ratio_response_is_identity_checked(self):
+        valid = _manifest(stock_url=None)["companies"][0]["ratios"]
+        mismatched = json.loads(json.dumps(valid))
+        mismatched["ticker"] = "AAPL.US"
+
+        for payloads in ((valid, mismatched), (mismatched, valid)):
+            with self.subTest(first_ticker=payloads[0]["ticker"]):
+                manifest = _manifest(stock_url=None)
+                manifest["companies"][0]["ratios"] = payloads[0]
+                duplicate = json.loads(json.dumps(manifest["companies"][0]))
+                duplicate["ratios"] = payloads[1]
+                duplicate["filings"][0]["id"] = "second-accession"
+                manifest["companies"].append(duplicate)
+
+                with self.assertRaisesRegex(
+                    BUILDER.HelperError,
+                    "Financial-ratio identity mismatch for MSFT.US",
+                ):
+                    BUILDER.build_data(manifest)
+
+    def test_duplicate_ratio_responses_select_newest_valid_year(self):
+        manifest = _manifest(stock_url=None)
+        manifest["companies"][0]["ratios"] = {
+            "ticker": "MSFT.US",
+            "year": 2024,
+            "ratios": {"returnOnEquity": 0.10},
+        }
+        duplicate = json.loads(json.dumps(manifest["companies"][0]))
+        duplicate["ratios"] = {
+            "ticker": "MSFT.US",
+            "year": 2025,
+            "ratios": {"returnOnEquity": 0.20},
+        }
+        duplicate["filings"][0]["id"] = "second-accession"
+        manifest["companies"].append(duplicate)
+
+        data, _statuses, _cache = BUILDER.build_data(manifest)
+
+        self.assertEqual(data["cos"][0]["roe"], "20.0%")
+        self.assertEqual(data["cos"][0]["rvintage"], "FY2025")
+
+    def test_duplicate_empty_ratio_payload_does_not_hide_valid_response(self):
+        manifest = _manifest(stock_url=None)
+        valid = manifest["companies"][0]["ratios"]
+        manifest["companies"][0]["ratios"] = {}
+        duplicate = json.loads(json.dumps(manifest["companies"][0]))
+        duplicate["ratios"] = valid
+        duplicate["filings"][0]["id"] = "second-accession"
+        manifest["companies"].append(duplicate)
+
+        data, _statuses, _cache = BUILDER.build_data(manifest)
+
+        self.assertEqual(data["cos"][0]["roe"], "33.3%")
+        self.assertEqual(data["cos"][0]["rvintage"], "FY2025")
 
     def test_unresolved_ticker_is_not_fetched_or_ratio_enriched(self):
         manifest = _manifest()
@@ -734,7 +886,7 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(data["cos"], [])
         self.assertEqual(statuses[0]["manifest_issues"], ["manifest_conflict"])
 
-    def test_conflicting_company_ciks_skip_enrichment_but_keep_filings(self):
+    def test_conflicting_company_ciks_fail_loudly(self):
         manifest = _manifest()
         manifest["companies"][0]["cik"] = "789019"
         duplicate = json.loads(json.dumps(manifest["companies"][0]))
@@ -743,16 +895,38 @@ class DashboardBuilderTests(unittest.TestCase):
         manifest["companies"].append(duplicate)
         calls = []
 
-        data, statuses, cache = BUILDER.build_data(
-            manifest,
-            stock_fetcher=lambda url: calls.append(url),
-        )
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "conflicting company identities: MSFT.US",
+        ):
+            BUILDER.build_data(
+                manifest,
+                stock_fetcher=lambda url: calls.append(url),
+            )
 
         self.assertEqual(calls, [])
-        self.assertEqual(len(data["cos"][0]["fs"]), 2)
-        self.assertEqual(statuses[0]["stock_context"], "identity_mismatch")
-        self.assertEqual(statuses[0]["manifest_issues"], ["manifest_conflict"])
-        self.assertEqual(cache, {})
+
+    def test_one_cik_cannot_belong_to_two_resolved_tickers(self):
+        manifest = _manifest()
+        manifest["companies"][0]["cik"] = "0000789019"
+        duplicate = json.loads(json.dumps(manifest["companies"][0]))
+        duplicate["ticker"] = "AAPL.US"
+        duplicate["name"] = "Apple Inc."
+        duplicate["ratios"]["ticker"] = "AAPL.US"
+        duplicate["filings"][0]["id"] = "apple-accession"
+        manifest["companies"].append(duplicate)
+        calls = []
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            r"CIK 0000789019 \(AAPL\.US, MSFT\.US\)",
+        ):
+            BUILDER.build_data(
+                manifest,
+                stock_fetcher=lambda url: calls.append(url),
+            )
+
+        self.assertEqual(calls, [])
 
     def test_merged_company_consumes_shared_stock_url_once(self):
         manifest = _manifest(stock_url="https://www.dfin.pro/api/v1/artifacts/BatchStock")
@@ -789,6 +963,150 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(data["cos"][0]["r"], [2.54, -1.0, 0.0, 1.243, -6.897])
         self.assertEqual(data["cos"][0]["eps"], [[-1, "2026-03-31: +0.0%"], [1, "2026-06-30: +12.6%"]])
         self.assertEqual(set(cache), {"MSFT.US"})
+
+    def test_inline_ticker_only_title_is_accepted(self):
+        manifest = _manifest(stock_url=None)
+        manifest["stock_context"] = _stock_batch(
+            "# MSFT.US\n\n"
+            "## Price\nPrice: $499.86 USD; Change: +$1.00 (+0.20%)"
+        )
+
+        data, statuses, cache = BUILDER.build_data(manifest)
+
+        self.assertEqual(statuses[0]["stock_context"], "ok")
+        self.assertEqual(data["cos"][0]["p"], "$499.86")
+        self.assertEqual(set(cache), {"MSFT.US"})
+
+    def test_inline_title_only_sparse_results_are_accepted(self):
+        for markdown in (
+            "# MSFT.US",
+            "# Microsoft Corporation (MSFT.US)",
+        ):
+            with self.subTest(markdown=markdown):
+                manifest = _manifest(stock_url=None)
+                manifest["stock_context"] = _stock_batch(markdown)
+
+                data, statuses, cache = BUILDER.build_data(manifest)
+
+                self.assertEqual(statuses[0]["stock_context"], "ok")
+                self.assertEqual(data["cos"][0]["p"], "—")
+                self.assertEqual(data["cos"][0]["r"], [None] * 5)
+                self.assertEqual(set(cache), {"MSFT.US"})
+
+    def test_inline_unforeseen_price_fields_are_accepted(self):
+        manifest = _manifest(stock_url=None)
+        manifest["stock_context"] = _stock_batch(
+            "# Microsoft Corporation (MSFT.US)\n\n"
+            "## Price\ncustom: reported"
+        )
+
+        data, statuses, cache = BUILDER.build_data(manifest)
+
+        self.assertEqual(statuses[0]["stock_context"], "ok")
+        self.assertEqual(data["cos"][0]["p"], "—")
+        self.assertEqual(set(cache), {"MSFT.US"})
+
+    def test_malformed_inline_stock_batch_fails_loudly(self):
+        manifest = _manifest(stock_url=None)
+        manifest["stock_context"] = {
+            "MSFT.US": {"data": _inline_stock_markdown()}
+        }
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "complete response object",
+        ):
+            BUILDER.build_data(manifest)
+
+    def test_malformed_inline_ticker_data_fails_loudly(self):
+        manifest = _manifest(stock_url=None)
+        manifest["stock_context"] = _stock_batch(
+            "# Microsoft Corporation (MSFT.US)\n\n"
+            "## Price\nPrice $499.86, return 2.54%"
+        )
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "no parseable price or returns section",
+        ):
+            BUILDER.build_data(manifest)
+
+    def test_missing_requested_ticker_result_fails_loudly(self):
+        manifest = _manifest(stock_url=None)
+        second = json.loads(json.dumps(manifest["companies"][0]))
+        second["ticker"] = "AAPL.US"
+        second["name"] = "Apple Inc."
+        second["ratios"]["ticker"] = "AAPL.US"
+        second["filings"][0]["id"] = "sec:0000320193:apple-accession"
+        manifest["companies"].append(second)
+        manifest["stock_context"] = _stock_batch()
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "missing requested ticker results: AAPL.US",
+        ):
+            BUILDER.build_data(manifest)
+
+    def test_upstream_identity_mismatch_error_fails_loudly(self):
+        manifest = _manifest(stock_url=None)
+        batch = _stock_batch()
+        batch["success_count"] = 0
+        batch["error_count"] = 1
+        batch["results"]["MSFT.US"] = {
+            "error": {
+                "type": "identity_mismatch",
+                "message": "Stock context identity did not match MSFT.US.",
+            }
+        }
+        manifest["stock_context"] = batch
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "Stock context identity mismatch for MSFT.US",
+        ):
+            BUILDER.build_data(manifest)
+
+    def test_identity_failure_cli_does_not_write_dashboard(self):
+        manifest = _manifest(stock_url=None)
+        payload = _stock_payload()
+        payload["ticker"] = "AAPL.US"
+        manifest["stock_context"] = _stock_batch(payload)
+
+        with tempfile.TemporaryDirectory() as directory:
+            template = Path(directory) / "dashboard.html"
+            output = Path(directory) / "result.html"
+            template.write_text("/* INJECT_DATA */", encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                mock.patch("sys.stdin", io.StringIO(json.dumps(manifest))),
+                mock.patch("sys.stdout", stdout),
+                mock.patch("sys.stderr", stderr),
+            ):
+                result = BUILDER.main(
+                    [
+                        "--template",
+                        str(template),
+                        "--output",
+                        str(output),
+                    ]
+                )
+
+            self.assertEqual(result, 2)
+            self.assertFalse(output.exists())
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("Stock context identity mismatch", stderr.getvalue())
+
+    def test_malformed_artifact_stock_batch_fails_loudly(self):
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "does not contain ticker-keyed results",
+        ):
+            BUILDER.build_data(
+                _manifest(),
+                stock_fetcher=lambda _url: {"results": {}},
+            )
 
     def test_compact_text_rows_exclude_dashboard_only_context(self):
         manifest = _manifest(stock_url=None)
@@ -1004,15 +1322,27 @@ class SkillContractTests(unittest.TestCase):
                     plugin_version,
                 )
 
-        self.assertNotIn("delivery", skill)
+        self.assertIn("delivery: api", skill)
+        self.assertIn("delivery: inline", skill)
+        self.assertIn("and `delivery: api`", skill)
+        self.assertNotIn("automatically based on response size", skill)
         self.assertIn("Call `get_stock_context` once with all resolved `tickers`", skill)
         self.assertIn('"stock_context_url": "<single-use batch capability>"', skill)
         self.assertIn('"stock_context": {<complete ticker-keyed batch>}', skill)
+        self.assertIn(
+            "including `format`, `count`, `success_count`, `error_count`, and `results`",
+            skill,
+        )
+        self.assertIn("Never retype, truncate, paraphrase, or hand-summarize", skill)
+        self.assertIn("aborts the build", skill)
+        self.assertIn("newest integer fiscal year", skill)
+        self.assertIn("two resolved tickers sharing one non-empty CIK", skill)
+        self.assertIn("a supplied malformed CIK aborts", skill)
         self.assertIn("build_dashboard.py --text --stock-cache", skill)
         self.assertIn("management changes announced today", skill)
         self.assertIn("morning scan for debt restructuring", skill)
         self.assertIn("ask for one monitoring theme and make no DFin calls", skill)
-        self.assertIn("ratio_identity_mismatch", skill)
+        self.assertIn("ratio ticker mismatch aborts the build", skill)
         self.assertIn("--offset", skill)
         self.assertNotIn("list_latest_filings", skill)
         self.assertNotIn("what happened in filings today", skill)

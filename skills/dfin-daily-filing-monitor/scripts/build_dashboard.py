@@ -274,18 +274,42 @@ def _inline_stock_markdown(markdown):
     if not isinstance(markdown, str) or not markdown or len(markdown) > 100_000:
         raise HelperError("An inline stock-context result is malformed or oversized.")
 
-    heading = re.search(r"(?m)^#\s+(.+?)\s+\(([^()]+)\)\s*$", markdown)
+    lines = markdown.strip().splitlines()
+    title = lines[0].strip()
+    named_heading = re.fullmatch(r"#\s+(.+?)\s+\(([^()]+)\)\s*", title)
+    ticker_heading = re.fullmatch(r"#\s+([^()\s]+)\s*", title)
 
-    if not heading:
+    if named_heading:
+        company_name = named_heading.group(1).strip()
+        ticker = _canonical_ticker(named_heading.group(2))
+    elif ticker_heading:
+        company_name = ""
+        ticker = _canonical_ticker(ticker_heading.group(1))
+    else:
         raise HelperError("An inline stock-context result has no ticker heading.")
-
-    company_name = heading.group(1).strip()
-    ticker = _canonical_ticker(heading.group(2))
 
     if not ticker:
         raise HelperError("An inline stock-context result has an invalid ticker.")
 
-    price_fields = _semicolon_fields(_markdown_section(markdown, "## Price"))
+    price_section = _markdown_section(markdown, "## Price")
+    price_fields = _semicolon_fields(price_section)
+    has_price_shape = bool(price_fields)
+    returns_section = _markdown_section(markdown, "## Returns")
+    has_returns_shape = bool(
+        re.search(r"(?m)^(?:Annual|To date|Other):\s*\S", returns_section)
+        or re.search(
+            r"(?mi)^\|\s*Period\s*\|\s*Cumulative\s*\|",
+            returns_section,
+        )
+    )
+
+    has_body = bool("\n".join(lines[1:]).strip())
+
+    if has_body and not has_price_shape and not has_returns_shape:
+        raise HelperError(
+            "An inline stock-context result has no parseable price or returns section."
+        )
+
     price_value = price_fields.get("Price", "")
     price_match = re.match(r"^(\S+)(?:\s+[A-Z]{3})?$", price_value)
     change_value = price_fields.get("Change", "")
@@ -312,7 +336,6 @@ def _inline_stock_markdown(markdown):
         "forward_pe": price_fields.get("Forward P/E", ""),
     }
 
-    returns_section = _markdown_section(markdown, "## Returns")
     one_year_match = re.search(
         r"(?mi)^\|\s*1y\s*\|\s*([^|]+?)\s*\|",
         returns_section,
@@ -738,7 +761,11 @@ def _normalized_companies(companies):
                 "name": str(company.get("name") or company.get("n") or ""),
                 "cik": cik,
                 "exchange": str(company.get("exchange") or ""),
-                "ratios": company.get("ratios"),
+                "_ratio_payloads": (
+                    [company.get("ratios")]
+                    if company.get("ratios") is not None
+                    else []
+                ),
                 "bg": company.get("bg"),
                 "fg": company.get("fg"),
                 "filings": normalized_filings,
@@ -765,8 +792,8 @@ def _normalized_companies(companies):
         elif not current["cik"] and cik:
             current["cik"] = cik
 
-        if current["ratios"] is None and company.get("ratios") is not None:
-            current["ratios"] = company.get("ratios")
+        if company.get("ratios") is not None:
+            current["_ratio_payloads"].append(company.get("ratios"))
 
         (
             current["filings"],
@@ -784,6 +811,28 @@ def _normalized_companies(companies):
 
     for identity in order:
         company = merged[identity]
+        ratio_payloads = company.pop("_ratio_payloads")
+        populated_ratios = [
+            payload
+            for payload in ratio_payloads
+            if isinstance(payload, dict) and payload
+        ]
+
+        if populated_ratios:
+            company["ratios"] = max(
+                enumerate(populated_ratios),
+                key=lambda item: (
+                    item[1].get("year")
+                    if isinstance(item[1].get("year"), int)
+                    and not isinstance(item[1].get("year"), bool)
+                    else -1,
+                    -item[0],
+                ),
+            )[1]
+        elif ratio_payloads:
+            company["ratios"] = {}
+        else:
+            company["ratios"] = None
 
         if company["filings"]:
             renderable.append(company)
@@ -814,7 +863,12 @@ def _stock_identity_matches(expected_ticker, expected_cik, stock):
     if _canonical_ticker(stock.get("ticker")) != expected_ticker:
         return False
 
-    stock_cik = _canonical_cik(stock.get("cik"))
+    supplied_cik = stock.get("cik")
+    stock_cik = _canonical_cik(supplied_cik)
+
+    if supplied_cik is not None and str(supplied_cik).strip() and not stock_cik:
+        return False
+
     return not (expected_cik and stock_cik and expected_cik != stock_cik)
 
 
@@ -1006,22 +1060,97 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
     if not isinstance(companies, list):
         raise HelperError("The dashboard manifest requires a companies list.")
 
+    ratio_identity_conflicts = set()
+
+    for company in companies:
+        if not isinstance(company, dict):
+            continue
+
+        canonical_ticker = _canonical_ticker(
+            company.get("ticker") or company.get("t")
+        )
+        ratios = company.get("ratios")
+
+        if not canonical_ticker or ratios is None or ratios == {}:
+            continue
+
+        if not _ratio_identity_matches(canonical_ticker, ratios):
+            ratio_identity_conflicts.add(canonical_ticker)
+
+    ratio_identity_conflicts = sorted(ratio_identity_conflicts)
+
+    if ratio_identity_conflicts:
+        raise HelperError(
+            "Financial-ratio identity mismatch for "
+            f"{', '.join(ratio_identity_conflicts)}."
+        )
+
     provided_stock_cache = stock_cache if isinstance(stock_cache, dict) else {}
     stock_cache = {}
     output_companies = []
     statuses = []
     normalized_companies, normalization_diagnostics = _normalized_companies(companies)
-    sanitized_provided_cache = {
-        ticker: sanitized
-        for key, value in provided_stock_cache.items()
-        if (ticker := _canonical_ticker(key))
-        if (sanitized := _sanitize_stock_cache_entry(value)) is not None
-    }
+    identity_conflicts = sorted(
+        {
+            str(company["ticker"] or company["_identity"])
+            for company in normalized_companies
+            if company["_identity_conflict"]
+        }
+        | {
+            str(diagnostic.get("ticker") or "unknown")
+            for diagnostic in normalization_diagnostics
+            if diagnostic.get("stock_context") == "identity_mismatch"
+        }
+    )
+    tickers_by_cik = {}
+
+    for company in normalized_companies:
+        if company["_canonical_ticker"] and company["cik"]:
+            tickers_by_cik.setdefault(company["cik"], set()).add(
+                company["_canonical_ticker"]
+            )
+
+    identity_conflicts.extend(
+        f"CIK {cik} ({', '.join(sorted(tickers))})"
+        for cik, tickers in sorted(tickers_by_cik.items())
+        if len(tickers) > 1
+    )
+
+    if identity_conflicts:
+        raise HelperError(
+            "The dashboard manifest contains conflicting company identities: "
+            f"{', '.join(identity_conflicts)}."
+        )
+
     requested_tickers = {
         company["_canonical_ticker"]
         for company in normalized_companies
-        if company["_canonical_ticker"] and not company["_identity_conflict"]
+        if company["_canonical_ticker"]
     }
+    expected_ciks = {
+        company["_canonical_ticker"]: company["cik"]
+        for company in normalized_companies
+        if company["_canonical_ticker"]
+    }
+    sanitized_provided_cache = {}
+    invalid_cached_tickers = set()
+
+    for key, value in provided_stock_cache.items():
+        ticker = _canonical_ticker(key)
+        sanitized = _sanitize_stock_cache_entry(value)
+
+        if not ticker or ticker not in requested_tickers:
+            continue
+
+        if sanitized is not None and _stock_identity_matches(
+            ticker,
+            expected_ciks.get(ticker),
+            sanitized,
+        ):
+            sanitized_provided_cache[ticker] = sanitized
+        else:
+            invalid_cached_tickers.add(ticker)
+
     uncached_tickers = requested_tickers.difference(sanitized_provided_cache)
     stock_url = manifest.get("stock_context_url")
     inline_stock_context = manifest.get("stock_context")
@@ -1042,14 +1171,31 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
                 del batch_payload
             except ArtifactRefreshRequired:
                 batch_status = "refresh_required"
-            except HelperError:
-                batch_status = "invalid"
         elif inline_stock_context is not None:
-            try:
-                fresh_results = _stock_batch_results(inline_stock_context)
-                batch_status = "ok"
-            except HelperError:
-                batch_status = "invalid"
+            if (
+                not isinstance(inline_stock_context, dict)
+                or inline_stock_context.get("format") != "inline"
+            ):
+                raise HelperError(
+                    "Inline stock context must be the complete response object "
+                    "with format set to inline."
+                )
+            fresh_results = _stock_batch_results(inline_stock_context)
+            batch_status = "ok"
+
+    if batch_status == "ok":
+        missing_tickers = sorted(uncached_tickers.difference(fresh_results))
+
+        if missing_tickers:
+            raise HelperError(
+                "The stock-context batch is missing requested ticker results: "
+                f"{', '.join(missing_tickers)}."
+            )
+    elif invalid_cached_tickers and batch_status == "not_requested":
+        raise HelperError(
+            "Cached stock context has an identity mismatch and no fresh source "
+            f"was provided for: {', '.join(sorted(invalid_cached_tickers))}."
+        )
 
     for index, company in enumerate(normalized_companies):
         ticker = company["ticker"]
@@ -1062,55 +1208,55 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
 
         if not canonical_ticker:
             stock_status = "unresolved"
-        elif company["_identity_conflict"]:
-            stock_status = "identity_mismatch"
         elif isinstance(cached_stock, dict):
-            if _stock_identity_matches(canonical_ticker, expected_cik, cached_stock):
-                stock = cached_stock
-                stock_cache[canonical_ticker] = cached_stock
-                stock_status = "cached"
-            else:
-                stock_status = "identity_mismatch"
+            stock = cached_stock
+            stock_cache[canonical_ticker] = cached_stock
+            stock_status = "cached"
         elif isinstance(fresh_result, dict) and isinstance(fresh_result.get("data"), dict):
             try:
                 candidate_stock = extract_stock_fields(fresh_result["data"])
+            except HelperError as exc:
+                raise HelperError(
+                    f"Stock context for {canonical_ticker} is malformed: {exc}"
+                ) from exc
 
-                if _stock_identity_matches(
-                    canonical_ticker,
-                    expected_cik,
-                    candidate_stock,
-                ):
-                    stock = candidate_stock
-                    stock_cache[canonical_ticker] = stock
-                    stock_status = "ok"
-                else:
-                    stock_status = "identity_mismatch"
-            except HelperError:
-                stock_status = "invalid"
+            if not _stock_identity_matches(
+                canonical_ticker,
+                expected_cik,
+                candidate_stock,
+            ):
+                raise HelperError(
+                    f"Stock context identity mismatch for {canonical_ticker}."
+                )
+
+            stock = candidate_stock
+            stock_cache[canonical_ticker] = stock
+            stock_status = "ok"
         elif isinstance(fresh_result, dict) and isinstance(fresh_result.get("error"), dict):
             error_type = str(fresh_result["error"].get("type") or "availability")
-            stock_status = (
-                "identity_mismatch"
-                if error_type == "identity_mismatch"
-                else "unavailable"
-            )
-        elif batch_status in {"refresh_required", "invalid"}:
+
+            if error_type == "identity_mismatch":
+                raise HelperError(
+                    f"Stock context identity mismatch for {canonical_ticker}."
+                )
+
+            stock_status = "unavailable"
+        elif batch_status == "refresh_required":
             stock_status = batch_status
         elif batch_status == "ok":
             stock_status = "unavailable"
 
         fiscal_year_end = stock.get("fy_end", "")
         ratios = company.get("ratios")
-        ratio_identity_mismatch = False
-
-        if stock_status in {"identity_mismatch", "unresolved"}:
+        if stock_status == "unresolved":
             usable_ratios = None
         elif isinstance(ratios, dict) and ratios:
             if _ratio_identity_matches(canonical_ticker, ratios):
                 usable_ratios = ratios
             else:
-                usable_ratios = None
-                ratio_identity_mismatch = True
+                raise HelperError(
+                    f"Financial-ratio identity mismatch for {canonical_ticker}."
+                )
         else:
             usable_ratios = None
 
@@ -1167,9 +1313,6 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
 
         if company["_manifest_issues"]:
             status["manifest_issues"] = company["_manifest_issues"]
-
-        if ratio_identity_mismatch:
-            status["ratio_context"] = "ratio_identity_mismatch"
 
         statuses.append(status)
 
@@ -1407,8 +1550,9 @@ def main(argv=None):
     except HelperError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(
-            "Hint: pass compact manifest JSON on stdin; request a fresh "
-            "get_stock_context batch URL when status is refresh_required.",
+            "Hint: pass compact manifest JSON on stdin, preserve a complete "
+            "inline get_stock_context response unchanged, and request a fresh "
+            "batch URL when status is refresh_required.",
             file=sys.stderr,
         )
         return 2

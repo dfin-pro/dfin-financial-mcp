@@ -70,7 +70,7 @@ python3 <skill-dir>/scripts/filing_artifact.py summarize --fetch --save <tempora
 
 The helper prints no more than 15 accession-level bundle summaries with previews of at most 220 characters, one validated SEC source link per bundle, and explicit remaining-count metadata. Keep the temporary artifact outside the repository and delete it after the scan. If `truncated` is true, request another page with `--offset <offset + shown_count>` only when the first page is deficient or the user requested exhaustive coverage.
 
-If the methodology-approved security-policy fallback required `delivery: inline`, write the direct response unchanged to `<temporary-json-path>`, then run:
+If the methodology-approved security-policy fallback required `delivery: inline`, write the entire direct response unchanged to `<temporary-json-path>`, then run:
 
 ```text
 python3 <skill-dir>/scripts/filing_artifact.py summarize --artifact <temporary-json-path>
@@ -101,7 +101,7 @@ For only the top 3–5 plausible cover-page-only bundles, take one scoped second
 python3 <skill-dir>/scripts/filing_artifact.py select --artifact <temporary-json-path> --bundle <bundle-id>
 ```
 
-Use the returned UUID batches in `search_in_documents` with one tight query, `results_per_query: 3`, and `delivery: api`. Never send more than 20 UUIDs. For API delivery, pass the returned URL to `summarize --fetch --save <second-look-json-path>`. If the methodology-approved security-policy fallback requires inline delivery, write its direct response unchanged to `<second-look-json-path>` and run `summarize --artifact <second-look-json-path>`. Use `select --artifact <second-look-json-path> --bundle <bundle-id>` only when the summary remains inconclusive, then stop when classification is possible. The selected result includes an `evidence_location` with the exact matching `doc_uuid`, `chunk_num`, and `content_chars`; if the bounded evidence ends at a material boundary, retrieve only that known chunk. Delete the second-look file after classification.
+Use the returned UUID batches in `search_in_documents` with one tight query, `results_per_query: 3`, and `delivery: api`. Never send more than 20 UUIDs. For API delivery, pass the returned URL to `summarize --fetch --save <second-look-json-path>`. If the methodology-approved security-policy fallback requires inline delivery, write its complete direct response unchanged to `<second-look-json-path>` and run `summarize --artifact <second-look-json-path>`. Use `select --artifact <second-look-json-path> --bundle <bundle-id>` only when the summary remains inconclusive, then stop when classification is possible. The selected result includes an `evidence_location` with the exact matching `doc_uuid`, `chunk_num`, and `content_chars`; if the bounded evidence ends at a material boundary, retrieve only that known chunk. Delete the second-look file after classification.
 
 If the needed exhibit was absent, use one exact-ticker, exact-filing-date `search_filings` call with one tight query. Never run a ticker follow-up without a date bound.
 
@@ -111,7 +111,7 @@ For a user-requested company deep dive, search selected bundle documents with fo
 
 ### Text mode
 
-Call `get_stock_context` once with all resolved `tickers`, `fields: ["price", "returns"]`, and `delivery: inline`. Skip ratios and descriptions. Put the complete compact batch in the manifest as `stock_context`, then feed it to:
+Call `get_stock_context` once with all resolved `tickers`, `fields: ["price", "returns"]`, and `delivery: inline`. Skip ratios and descriptions. Put the entire response object in the manifest as `stock_context`, unedited and including `format`, `count`, `success_count`, `error_count`, and `results`, then feed it to:
 
 ```text
 python3 <skill-dir>/scripts/build_dashboard.py --text --stock-cache <temporary-cache-path>
@@ -125,11 +125,11 @@ Read `methodology_financials`. Then:
 
 1. For every resolved included company, call `get_financial_ratios` for the current year with `period: "FY"` and fields `returnOnEquity`, `returnOnInvestedCapital`, `netDebtToEBITDA`, and `ebitdaMargin`. On unavailable data, try the prior year and then one year earlier; stop at the first valid response.
 2. Call `get_stock_context` once with all resolved `tickers` and `delivery: api`. Omit `fields`; API delivery returns the complete shared artifact and rejects a supplied field selector.
-3. Put the compact ratio responses and the shared capability URL in the dashboard manifest as `stock_context_url`. Do not inspect the artifact payload.
+3. Put the compact ratio responses and the shared capability URL in the dashboard manifest as `stock_context_url`. Do not inspect the artifact payload outside the helper. Never retype, truncate, paraphrase, or hand-summarize a `data` field inside `results`; the builder parses the tool's exact response shape.
 
 The builder extracts only top-level company name, ticker, description, structured price/returns/technicals, date-keyed earnings history, and allowlisted profile fields. It discards database, user-note, executive, estimate, and other unused sections.
 
-The builder selects each company from the shared artifact by ticker, verifies fresh and cached stock identity, and verifies the ticker in every compact ratio response. A missing or failed ticker result keeps the filing card but omits enrichment. A stock ticker or secondary CIK mismatch reports `identity_mismatch`; a ratio ticker mismatch reports `ratio_identity_mismatch`. An unresolved issuer reports `unresolved` and is never fetched. Duplicate company records merge by qualified ticker, while unresolved issuers merge only by CIK or bundle identity; every filing requires a bundle ID, duplicate accession IDs merge, and conflicting or malformed bundles are omitted with `manifest_conflict`.
+The builder selects each company from the shared artifact by ticker, verifies fresh and cached stock identity, and verifies the ticker in every compact ratio response before duplicate records are merged. For duplicate ratio responses, it uses the valid response with the newest integer fiscal year, preserving input order as the tie-breaker. Every uncached resolved ticker must have either a data result or an explicit error result. A missing ticker, malformed batch or ticker payload, conflicting manifest identity, two resolved tickers sharing one non-empty CIK, stock ticker or supplied secondary CIK mismatch, or ratio ticker mismatch aborts the build instead of creating a silently incomplete dashboard. A truly omitted stock CIK remains valid sparse data, but a supplied malformed CIK aborts. An invalid cache entry is discarded and refetched when a fresh source is available; without a fresh source it aborts. Legitimate sparse inline results, unresolved issuers, explicit availability errors, and refresh-required responses remain graceful: unavailable values stay `—`, unresolved issuers are never fetched, and filing cards remain present. Duplicate company records merge by qualified ticker, while unresolved issuers merge only by CIK or bundle identity; every filing requires a bundle ID, duplicate accession IDs merge, and conflicting or malformed filing bundles are omitted with `manifest_conflict`.
 
 The builder applies these rules:
 
@@ -171,7 +171,7 @@ Create a compact manifest and feed it to `build_dashboard.py` on stdin. Do not i
 }
 ```
 
-For an inline MCP response, replace `stock_context_url` with `"stock_context": {<complete ticker-keyed batch>}`. Never provide both keys.
+For an inline MCP response, replace `stock_context_url` with `"stock_context": {<complete ticker-keyed batch>}`. Copy the entire response object unchanged; never extract only `results` or rewrite any nested `data` string. Never provide both keys.
 
 Run:
 
