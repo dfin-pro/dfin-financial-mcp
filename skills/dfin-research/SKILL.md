@@ -8,7 +8,7 @@ description: >-
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.6, updated 2026-08-07.
+DFin skill version: 0.1.7, updated 2026-08-08.
 
 Use this MCP first for any equity research. Load only the focused methodology needed for the tool areas used. Treat live input schemas as the authority for arguments and request contracts.
 

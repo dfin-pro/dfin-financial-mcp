@@ -13,13 +13,13 @@ Source-grounded company **SEC filings**, **financial statements**, **ratios**, *
 - **The `dfin-screener` skill** - builds and runs contract-backed stock screens across financial, valuation, growth, technical, and other supported criteria.
 - **The `dfin-note` skill** - saves completed financial research or material news as structured private notes with research or news categories and source relationships.
 - **The `dfin-daily-filing-monitor` skill** - scans recent SEC filings for a requested theme or corporate event and presents an enriched briefing or dashboard.
-- **Codex and Claude packaging** - Claude plugin metadata, Codex plugin metadata (which bundles the MCP connection for Codex), and agent-facing docs links.
+- **Codex and Claude packaging** - both plugin formats bundle the OAuth-enabled MCP connection, alongside agent-facing docs links.
 
 ## Setup
 
-### 1. Choose authentication
+### 1. Create your account
 
-Create an account at **[dfin.pro](https://www.dfin.pro)**. Interactive clients should connect to the canonical `https://www.dfin.pro/mcp` endpoint and complete OAuth sign-in. Existing integrations can continue to use a dfin.pro API key in the `Authorization: Bearer <api_key>` header.
+Create an account at **[dfin.pro](https://www.dfin.pro)**. The bundled MCP connection uses the canonical `https://www.dfin.pro/mcp` endpoint and discovers dfin.pro's OAuth configuration automatically. No API key or environment variable is required for the plugin flow.
 
 ### 2. Install the plugin
 
@@ -30,7 +30,7 @@ Create an account at **[dfin.pro](https://www.dfin.pro)**. Interactive clients s
 /plugin install dfin-financial-mcp@dfin
 ```
 
-This installs the four bundled skills. On Claude Code you connect the MCP server yourself (step 3).
+This installs the four bundled skills and the dfin.pro MCP connection. Complete the OAuth prompt in step 3.
 
 **Codex:**
 
@@ -38,18 +38,21 @@ This installs the four bundled skills. On Claude Code you connect the MCP server
 codex plugin marketplace add dfin-pro/dfin-financial-mcp
 ```
 
-Then install `dfin-financial-mcp` from the **dfin.pro** marketplace - in the Codex app under **Plugins**, or with `/plugins` in the Codex CLI - and start a new thread. Codex ships the connection: set `DFIN_API_KEY` and Codex authenticates to `https://www.dfin.pro/mcp` with `Authorization: Bearer ${DFIN_API_KEY}` automatically.
+Then install `dfin-financial-mcp` from the **dfin.pro** marketplace - in the Codex app under **Plugins**, or with `/plugins` in the Codex CLI. The marketplace requests authentication on install, and the bundled MCP connection starts the dfin.pro OAuth flow. Start a new thread after installation.
 
-### 3. Connect the MCP server (Claude)
+### 3. Complete OAuth sign-in
 
-On Claude the plugin installs the skills only, so you add the connection yourself:
+- **Claude Code** - after installation, run `/reload-plugins` if Claude asks you to activate the plugin. Then open `/mcp`, select `dfin`, and choose **Authenticate**. Claude opens the dfin.pro OAuth page in your browser; sign in, approve access, and return to Claude Code. If the browser does not open, copy the authentication URL shown by Claude into your browser. After updating an existing install, run `/reload-plugins` or restart Claude Code before authenticating.
+- **Codex** - follow the authentication prompt shown during installation. If it is still waiting for authentication, open the MCP server list and select **Authenticate**, or run `codex mcp login dfin` when the server is configured as a standalone MCP connection.
+- **Claude Cowork and other connector-based clients** - add `https://www.dfin.pro/mcp` as a custom connector and complete the OAuth sign-in flow.
 
-- **Claude Code and Claude Cowork** - add `https://www.dfin.pro/mcp` as a custom connector or remote MCP server and complete the OAuth sign-in flow.
-- **Existing header-based integrations** - continue sending `Authorization: Bearer <DFIN_API_KEY>` if you are not ready to migrate to OAuth. Use an environment variable rather than hard-coding the key.
+If you previously installed version `0.1.6` or earlier, update or reinstall the plugin before retrying authentication. Those releases could leave an API-key-based MCP configuration in the client's plugin cache.
+
+Existing non-plugin integrations can continue sending `Authorization: Bearer <DFIN_API_KEY>` if they are not ready to migrate to OAuth. Use an environment variable rather than hard-coding the key.
 
 The legacy `https://www.dfin.pro/mcp/<your-api-key>` compatibility URL remains available for older clients that support neither OAuth nor custom headers, but it is not recommended because credential-bearing URLs can be retained by client, proxy, or browser logs.
 
-For step-by-step setup per client - environment variables, the Codex install flow, and the Cowork connector - see the **[dfin.pro MCP setup docs](https://www.dfin.pro/docs/mcp/)**.
+For current OAuth setup details and client-specific troubleshooting, see the **[dfin.pro MCP setup docs](https://www.dfin.pro/docs/mcp/)**.
 
 ## Documentation
 

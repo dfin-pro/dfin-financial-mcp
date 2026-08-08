@@ -1,6 +1,6 @@
 {
   "name": "dfin-financial-mcp",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "dfin.pro MCP for Fundamental Research - source-grounded SEC filings, financial statements, ratios, stock context, fund/ETF analytics, transcripts, reports, and a fundamentals screener for AI agents.",
   "author": {
     "name": "dfin.pro",
@@ -23,7 +23,7 @@
     "llm-tools"
   ],
   "skills": "./skills/",
-  "mcpServers": "./.codex-plugin/mcp.json",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "dfin.pro Financial MCP",
     "shortDescription": "Source-grounded financial research tools for Codex.",
@@ -38,6 +38,8 @@
       "Transcript and report search"
     ],
     "websiteURL": "https://www.dfin.pro/docs/mcp/",
+    "privacyPolicyURL": "https://www.dfin.pro/legal",
+    "termsOfServiceURL": "https://www.dfin.pro/legal",
     "brandColor": "#2563EB",
     "defaultPrompt": [
       "Research a company using dfin.pro MCP tools.",

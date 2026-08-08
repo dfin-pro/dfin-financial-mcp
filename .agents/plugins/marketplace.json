@@ -7,8 +7,9 @@
     {
       "name": "dfin-financial-mcp",
       "source": {
-        "source": "local",
-        "path": "./"
+        "source": "url",
+        "url": "https://github.com/dfin-pro/dfin-financial-mcp.git",
+        "ref": "main"
       },
       "policy": {
         "installation": "AVAILABLE",

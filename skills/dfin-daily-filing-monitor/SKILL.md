@@ -7,7 +7,7 @@ description: Monitor recent SEC filings for a named topic or corporate event. Us
 
 Before the first DFin call, read `agent_help(topic="agent_guide")` once. Read `methodology_search` before discovery, `methodology_financials` before ratio enrichment, and `output_guidelines` before presenting substantive results.
 
-DFin skill version: 0.1.6, updated 2026-08-07.
+DFin skill version: 0.1.7, updated 2026-08-08.
 
 Monitor US-listed SEC filers, including foreign private issuers and ADRs. Keep exchange-qualified tickers exactly as returned. Deliver one company card with one nested section per filing bundle, or a concise table when the user requests text.
 
