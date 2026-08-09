@@ -64,6 +64,15 @@ class PluginPackageTests(unittest.TestCase):
         self.assertEqual(claude_manifest["version"], PLUGIN_VERSION)
         self.assertEqual(codex_manifest["version"], PLUGIN_VERSION)
 
+    def test_screener_skill_has_codex_interface_metadata(self):
+        metadata_path = REPOSITORY_ROOT / "skills/dfin-screener/agents/openai.yaml"
+
+        self.assertTrue(metadata_path.is_file())
+        metadata = metadata_path.read_text(encoding="utf-8")
+        self.assertIn('display_name: "DFin Screener"', metadata)
+        self.assertIn("$dfin-screener", metadata)
+        self.assertIn("allow_implicit_invocation: true", metadata)
+
 
 if __name__ == "__main__":
     unittest.main()

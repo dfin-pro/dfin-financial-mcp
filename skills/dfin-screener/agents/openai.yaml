@@ -1,0 +1,8 @@
+interface:
+  display_name: "DFin Screener"
+  short_description: "Build token-efficient public stock screens"
+  brand_color: "#2563EB"
+  default_prompt: "Use $dfin-screener to build and run a source-grounded public stock screen with compact contract discovery."
+
+policy:
+  allow_implicit_invocation: true
