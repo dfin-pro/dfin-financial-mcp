@@ -34,8 +34,9 @@ Read [references/news.md](references/news.md) for every news note and whenever o
     - Use `get_note` when complete content is needed to compare a candidate or decide whether to link it.
 4. Draft a concise, distinctive subject and self-standing Markdown body using only the mode elements that materially improve the note. Do not put company names or tickers in the subject.
 5. Compare the draft with relevant existing user notes and DFin reports. Point out material support, contradiction, or potentially stale prior research to the user. If a contradiction would change the saved conclusion or intended relationships, ask the user to resolve it before creation. Otherwise, include the material comparison in the note and proceed.
-6. Call `create_note` with the selected category, drafted subject and body, all material tickers, and only note, report, transcript, or raw-document relationships materially relevant to the saved conclusion.
-7. Report the created note's `note_id`, category, subject, linked tickers, and any omitted or uncertain references. Present `url` as the direct link for opening the formatted note.
+6. Before saving, present the proposed note to the user. Summarize its key points, separately identify every new inference or conclusion, and call out material assumptions, uncertainties, and unsupported or contested claims. Ask the user to confirm that the draft, including its conclusions, is correct or to provide revisions. Do not call `create_note` until the user gives clear approval.
+7. Call `create_note` with the user-confirmed category, subject and body, all material tickers, and only note, report, transcript, or raw-document relationships materially relevant to the saved conclusion.
+8. Report the created note's `note_id`, category, subject, linked tickers, and any omitted or uncertain references. Present `url` as the direct link for opening the formatted note.
 
 ## Reference Placement
 
