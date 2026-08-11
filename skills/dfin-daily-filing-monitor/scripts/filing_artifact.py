@@ -29,15 +29,29 @@ KNOWN_FORMS = ("10-K", "10-Q", "20-F", "8-K", "6-K")
 QUALIFIED_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9._/-]*\.[A-Z0-9]{2,8}$")
 CIK_RE = re.compile(r"^[0-9]{1,10}$")
 ACCESSION_RE = re.compile(r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
+ACCESSION_COMPACT_RE = re.compile(r"^[0-9]{18}$")
 FAILURE_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 FORM_PREFIX_RE = re.compile(r"^[A-Z0-9][A-Z0-9 /-]{0,49}$")
-CAPABILITY_URL_FRAGMENT = "www.dfin.pro/api/v1/artifacts/"
+CAPABILITY_URL_RE = re.compile(
+    r"www\.dfin\.pro(?::(?:0*443)?)?/api/v1/artifacts/",
+    re.IGNORECASE,
+)
 DEFAULT_PREVIEW_CHARS = 220
 DEFAULT_EVIDENCE_CHARS = 800
 MAX_SUMMARIES = 15
 MAX_DOC_UUIDS = 20
 MAX_COVERAGE_ROWS = 50
-COVERAGE_STATE_VERSION = 1
+COVERAGE_STATE_VERSION = 3
+ALLOWED_FAILURE_REASONS = frozenset(
+    {
+        "artifact_unavailable",
+        "malformed_response",
+        "rate_limited",
+        "timeout",
+        "unresolved_ticker",
+    }
+)
+BROAD_FAILURE_REASONS = ALLOWED_FAILURE_REASONS - {"unresolved_ticker"}
 
 
 class HelperError(Exception):
@@ -312,12 +326,25 @@ def _source_metadata(result):
     return metadata
 
 
-def _cik_and_accession(result):
+def _sec_cik_and_accession(result):
+    """Return issuer CIK/accession only from a validated SEC archive source."""
     source_uri = validate_sec_url(_source_metadata(result).get("source_uri"))
     match = SEC_SOURCE_RE.search(source_uri or "")
 
     if match:
-        return match.group("cik").zfill(10), match.group("accession")
+        return match.group("cik").zfill(10), _normalized_accession(
+            match.group("accession")
+        )
+
+    return None, None
+
+
+def _cik_and_accession(result):
+    """Return SEC identity, with a name-derived CIK fallback for bundle grouping."""
+    cik, accession = _sec_cik_and_accession(result)
+
+    if cik:
+        return cik, accession
 
     name_match = NAME_CIK_RE.search(str(result.get("name") or ""))
     cik = name_match.group(1).zfill(10) if name_match else None
@@ -638,6 +665,124 @@ def _decode_envelope(value):
     return value
 
 
+def _decode_search_envelope(value):
+    """Decode saved API or inline search responses without losing an empty result."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HelperError("The saved search response is not valid JSON.") from exc
+
+    if isinstance(value, dict) and set(value) == {"text"}:
+        return _decode_search_envelope(value["text"])
+
+    if (
+        isinstance(value, dict)
+        and set(value) == {"result"}
+        and isinstance(value["result"], (dict, list, str))
+    ):
+        return _decode_search_envelope(value["result"])
+
+    if not isinstance(value, (dict, list)):
+        raise HelperError("The saved search response must be a JSON object or array.")
+
+    return value
+
+
+def load_search_response(path):
+    """Return decoded results plus content and canonical-path receipts."""
+    path = Path(path)
+
+    try:
+        response_bytes = path.read_bytes()
+        response_path = str(path.resolve(strict=True)).encode("utf-8")
+        payload = json.loads(response_bytes.decode("utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise HelperError(f"Could not read the saved search response: {exc}.") from None
+    except json.JSONDecodeError as exc:
+        raise HelperError(
+            f"Invalid saved search JSON at line {exc.lineno}, column {exc.colno}."
+        ) from None
+
+    payload = _decode_search_envelope(payload)
+    response_id = hashlib.sha256(response_bytes).hexdigest()
+    artifact_id = hashlib.sha256(response_path).hexdigest()
+
+    if isinstance(payload, list):
+        raw_results = payload
+        declared_count = len(raw_results)
+    else:
+        raw_results = payload.get("results")
+        declared_count = payload.get("count")
+
+        if raw_results is None and declared_count == 0:
+            raw_results = []
+
+        if not isinstance(raw_results, list):
+            raise HelperError(
+                "The saved search response must contain a results array or count=0."
+            )
+
+        if declared_count is None:
+            declared_count = len(raw_results)
+
+    if not _valid_non_negative_integer(declared_count):
+        raise HelperError("The saved search response count must be a non-negative integer.")
+
+    if declared_count != len(raw_results):
+        raise HelperError("The saved search response count does not match its results.")
+
+    results = []
+
+    for value in raw_results:
+        decoded = _decode_result(value)
+
+        if not isinstance(decoded, dict) or not _looks_like_result(decoded):
+            raise HelperError("The saved search response contains a malformed filing result.")
+
+        results.append(decoded)
+
+    return results, declared_count, response_id, artifact_id
+
+
+def _query_plan(values):
+    """Return one stable fingerprint for a non-empty thematic query set."""
+    normalized = []
+
+    for value in values or []:
+        query = " ".join(str(value or "").split()).casefold()
+
+        if not query or len(query) > 300:
+            raise HelperError("Every --query must contain 1 to 300 characters.")
+
+        if query not in normalized:
+            normalized.append(query)
+
+    if not 1 <= len(normalized) <= 12:
+        raise HelperError("Provide between 1 and 12 distinct --query values.")
+
+    canonical = sorted(normalized)
+    digest = hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {"query_count": len(canonical), "query_hash": digest}
+
+
+def _bind_query_plan(state, values):
+    """Require every broad and ticker search to use the same thematic queries."""
+    plan = _query_plan(values)
+    existing = state.get("search_plan")
+
+    if existing is None:
+        state["search_plan"] = plan
+    elif existing != plan:
+        raise HelperError(
+            "The search queries do not match the thematic query set already recorded."
+        )
+
+    return plan
+
+
 def _normalized_form(value):
     """Return one non-empty uppercase form prefix."""
     form = " ".join(str(value or "").split()).upper()
@@ -671,6 +816,18 @@ def _valid_non_negative_integer(value):
 def _valid_cik(value):
     text = str(value or "").strip()
     return text.zfill(10) if CIK_RE.fullmatch(text) else None
+
+
+def _normalized_accession(value):
+    text = str(value or "").strip()
+
+    if ACCESSION_RE.fullmatch(text):
+        return text
+
+    if ACCESSION_COMPACT_RE.fullmatch(text):
+        return f"{text[:10]}-{text[10:12]}-{text[12:]}"
+
+    return None
 
 
 def _date_window(filters):
@@ -743,18 +900,19 @@ def _enumeration_state(payload, expected_forms):
     inconsistencies = []
     accessions = {}
     filers = {}
+    observed_by_filing_type = {}
 
     for row in results:
         if not isinstance(row, dict):
             _append_unique(inconsistencies, "malformed_accession_row")
             continue
 
-        accession = str(row.get("accession_number") or "").strip()
+        accession = _normalized_accession(row.get("accession_number"))
         cik = _valid_cik(row.get("cik"))
         filing_type = " ".join(str(row.get("filing_type") or "").split()).upper()
         filing_date = str(row.get("filing_date") or "").strip()
 
-        if not ACCESSION_RE.fullmatch(accession) or cik is None or not filing_type:
+        if accession is None or cik is None or not filing_type:
             _append_unique(inconsistencies, "malformed_accession_row")
             continue
 
@@ -766,9 +924,11 @@ def _enumeration_state(payload, expected_forms):
 
         if not window_start <= parsed_filing_date <= window_end:
             _append_unique(inconsistencies, "accession_outside_window")
+            continue
 
         if not any(filing_type.startswith(form) for form in expected_forms):
             _append_unique(inconsistencies, "unexpected_filing_type")
+            continue
 
         existing_accession = accessions.get(accession)
         accession_record = {
@@ -783,6 +943,9 @@ def _enumeration_state(payload, expected_forms):
             continue
 
         accessions[accession] = accession_record
+        observed_by_filing_type[filing_type] = (
+            observed_by_filing_type.get(filing_type, 0) + 1
+        )
         filer = filers.setdefault(
             cik,
             {
@@ -870,6 +1033,9 @@ def _enumeration_state(payload, expected_forms):
     if sum(by_filing_type.values()) != accession_count:
         _append_unique(inconsistencies, "filing_type_count_mismatch")
 
+    if by_filing_type != dict(sorted(observed_by_filing_type.items())):
+        _append_unique(inconsistencies, "filing_type_population_mismatch")
+
     as_of = coverage.get("as_of")
 
     if not isinstance(as_of, str) or not as_of.strip():
@@ -901,10 +1067,16 @@ def _enumeration_state(payload, expected_forms):
         },
         "accessions": accessions,
         "filers": filers,
+        "search_plan": None,
+        "broad_searches": {},
+        "broad_failures": {},
+        "consumed_responses": {},
+        "consumed_artifacts": {},
         "broad_surfaced": [],
         "individually_checked": {},
         "failed": {},
         "unexpected": [],
+        "unexpected_accessions": [],
         "identity_issues": inconsistencies,
     }
     return state
@@ -912,7 +1084,7 @@ def _enumeration_state(payload, expected_forms):
 
 def _contains_capability_url(value):
     if isinstance(value, str):
-        return CAPABILITY_URL_FRAGMENT in value.lower()
+        return CAPABILITY_URL_RE.search(value) is not None
 
     if isinstance(value, dict):
         return any(
@@ -926,9 +1098,388 @@ def _contains_capability_url(value):
     return False
 
 
-def _write_state(path, state):
+def _valid_query_receipt(value):
+    return (
+        isinstance(value, dict)
+        and set(value) >= {"query_count", "query_hash"}
+        and isinstance(value.get("query_count"), int)
+        and not isinstance(value.get("query_count"), bool)
+        and 1 <= value["query_count"] <= 12
+        and isinstance(value.get("query_hash"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["query_hash"]) is not None
+    )
+
+
+def _valid_response_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _response_id_in_use(state, response_id, *, exclude=None):
+    owner = state["consumed_responses"].get(response_id)
+    excluded_owner = f"{exclude[0]}:{exclude[1]}" if exclude is not None else None
+    return owner is not None and owner != excluded_owner
+
+
+def _artifact_id_in_use(state, artifact_id, *, exclude=None):
+    if artifact_id is None:
+        return False
+
+    owner = state["consumed_artifacts"].get(artifact_id)
+    excluded_owner = f"{exclude[0]}:{exclude[1]}" if exclude is not None else None
+    return owner is not None and owner != excluded_owner
+
+
+def _empty_receipt_id(state, owner, plan):
+    """Return an owner- and scope-bound ID for an agent-attested empty response."""
+    payload = {
+        "owner": owner,
+        "date_from": state["scope"]["date_from"],
+        "date_to": state["scope"]["date_to"],
+        "query_hash": plan["query_hash"],
+        "query_count": plan["query_count"],
+        "kind": "agent_attested_empty",
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_state(state):
+    """Reject malformed or internally inconsistent coverage state."""
+    if not isinstance(state, dict) or state.get("schema_version") != COVERAGE_STATE_VERSION:
+        raise HelperError("The coverage state is missing or has an unsupported schema version.")
+
     if _contains_capability_url(state):
-        raise HelperError("Capability URLs cannot be written to coverage state.")
+        raise HelperError("Capability URLs cannot be stored in coverage state.")
+
+    required_objects = (
+        "scope",
+        "enumeration",
+        "accessions",
+        "filers",
+        "broad_searches",
+        "broad_failures",
+        "consumed_responses",
+        "consumed_artifacts",
+        "individually_checked",
+        "failed",
+    )
+
+    if any(not isinstance(state.get(key), dict) for key in required_objects):
+        raise HelperError("The coverage state has a malformed object field.")
+
+    for key in (
+        "broad_surfaced",
+        "unexpected",
+        "unexpected_accessions",
+        "identity_issues",
+    ):
+        if not isinstance(state.get(key), list):
+            raise HelperError(f"The coverage state field {key} must be an array.")
+
+    scope = state["scope"]
+    expected_forms = _normalized_expected_forms(scope.get("expected_forms"))
+
+    if expected_forms != scope.get("expected_forms"):
+        raise HelperError("The coverage state contains non-normalized expected forms.")
+
+    _date_window(scope)
+    accessions = state["accessions"]
+    filers = state["filers"]
+    accession_owners = {}
+
+    for accession, record in accessions.items():
+        if not isinstance(accession, str) or not ACCESSION_RE.fullmatch(accession):
+            raise HelperError("The coverage state contains an invalid accession key.")
+
+        if not isinstance(record, dict):
+            raise HelperError("The coverage state contains a malformed accession record.")
+
+        cik = _valid_cik(record.get("cik"))
+
+        if cik is None:
+            raise HelperError("The coverage state contains an invalid accession CIK.")
+
+        filing_type = " ".join(str(record.get("filing_type") or "").split()).upper()
+
+        if not filing_type or not any(
+            filing_type.startswith(form) for form in expected_forms
+        ):
+            raise HelperError("The coverage state contains an out-of-scope filing type.")
+
+        try:
+            filing_date = datetime.date.fromisoformat(str(record.get("filing_date") or ""))
+            date_from = datetime.date.fromisoformat(scope["date_from"])
+            date_to = datetime.date.fromisoformat(scope["date_to"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HelperError("The coverage state contains an invalid filing date.") from exc
+
+        if not date_from <= filing_date <= date_to:
+            raise HelperError("The coverage state contains an out-of-window accession.")
+
+    for cik, filer in filers.items():
+        normalized_cik = _valid_cik(cik)
+
+        if normalized_cik != cik or not isinstance(filer, dict) or filer.get("cik") != cik:
+            raise HelperError("The coverage state contains a malformed filer identity.")
+
+        for key in ("accessions", "filing_types", "filing_dates", "tickers"):
+            if not isinstance(filer.get(key), list):
+                raise HelperError("The coverage state contains a malformed filer record.")
+
+        if not filer["accessions"]:
+            raise HelperError("Every coverage filer must own at least one accession.")
+
+        for accession in filer["accessions"]:
+            if accession not in accessions or accessions[accession].get("cik") != cik:
+                raise HelperError("The coverage state contains an invalid filer/accession link.")
+
+            if accession in accession_owners:
+                raise HelperError("A coverage accession is assigned to more than one filer.")
+
+            accession_owners[accession] = cik
+
+        expected_filing_types = list(
+            dict.fromkeys(accessions[value]["filing_type"] for value in filer["accessions"])
+        )
+        expected_filing_dates = list(
+            dict.fromkeys(accessions[value]["filing_date"] for value in filer["accessions"])
+        )
+
+        if (
+            filer["filing_types"] != expected_filing_types
+            or filer["filing_dates"] != expected_filing_dates
+        ):
+            raise HelperError("The coverage state contains inconsistent filer metadata.")
+
+        tickers = []
+
+        for value in filer["tickers"]:
+            ticker = _qualified_ticker(value)
+
+            if ticker is None or ticker.upper() in {item.upper() for item in tickers}:
+                raise HelperError("The coverage state contains malformed ticker aliases.")
+
+            tickers.append(ticker)
+
+        search_ticker = filer.get("search_ticker")
+
+        if search_ticker is not None and (
+            _qualified_ticker(search_ticker) is None
+            or search_ticker.upper() not in {item.upper() for item in tickers}
+        ):
+            raise HelperError("The coverage state contains an invalid selected search ticker.")
+
+    if set(accession_owners) != set(accessions):
+        raise HelperError("The coverage state does not assign every accession to one filer.")
+
+    known_ciks = set(filers)
+
+    if not all(
+        isinstance(value, dict)
+        and set(value) == {"cik", "ticker"}
+        and (value["cik"] is None or _valid_cik(value["cik"]) is not None)
+        and (value["ticker"] is None or _qualified_ticker(value["ticker"]) is not None)
+        for value in state["unexpected"]
+    ):
+        raise HelperError("The coverage state contains a malformed unexpected-filer record.")
+
+    unexpected_accessions = state["unexpected_accessions"]
+
+    if any(
+        not isinstance(value, str) or _normalized_accession(value) != value
+        for value in unexpected_accessions
+    ) or len(unexpected_accessions) != len(set(unexpected_accessions)):
+        raise HelperError("The coverage state contains an invalid unexpected accession.")
+
+    if any(cik not in known_ciks for cik in state["broad_surfaced"]):
+        raise HelperError("The coverage state contains an unknown broadly surfaced filer.")
+
+    search_plan = state.get("search_plan")
+
+    if search_plan is not None and not _valid_query_receipt(search_plan):
+        raise HelperError("The coverage state contains a malformed thematic search plan.")
+
+    for form, receipt in state["broad_searches"].items():
+        if form not in expected_forms or not _valid_query_receipt(receipt):
+            raise HelperError("The coverage state contains an invalid broad-search receipt.")
+
+        surfaced_ciks = receipt.get("surfaced_ciks")
+        authoritative_ciks = receipt.get("authoritative_ciks")
+
+        if (
+            not _valid_non_negative_integer(receipt.get("result_count"))
+            or not _valid_response_id(receipt.get("response_id"))
+            or receipt.get("receipt_kind")
+            not in {"validated_result_artifact", "agent_attested_empty"}
+            or receipt.get("expected_form") != form
+            or receipt.get("date_from") != scope.get("date_from")
+            or receipt.get("date_to") != scope.get("date_to")
+            or not isinstance(surfaced_ciks, list)
+            or not isinstance(authoritative_ciks, list)
+            or any(not isinstance(cik, str) for cik in surfaced_ciks)
+            or any(not isinstance(cik, str) for cik in authoritative_ciks)
+            or len(surfaced_ciks) != len(set(surfaced_ciks))
+            or len(authoritative_ciks) != len(set(authoritative_ciks))
+            or any(cik not in known_ciks for cik in surfaced_ciks)
+            or any(cik not in surfaced_ciks for cik in authoritative_ciks)
+        ):
+            raise HelperError("A broad-search receipt has an invalid result count or filer set.")
+
+        if state["consumed_responses"].get(receipt["response_id"]) != f"broad:{form}":
+            raise HelperError("A broad-search receipt has an invalid response owner.")
+
+        artifact_id = receipt.get("artifact_id")
+
+        if receipt["receipt_kind"] == "validated_result_artifact":
+            if (
+                receipt["result_count"] == 0
+                or not _valid_response_id(artifact_id)
+                or state["consumed_artifacts"].get(artifact_id) != f"broad:{form}"
+            ):
+                raise HelperError("A broad-search artifact receipt is invalid.")
+        elif artifact_id is not None or receipt["result_count"] != 0:
+            raise HelperError("An attested empty broad-search receipt is invalid.")
+
+        if receipt["receipt_kind"] == "agent_attested_empty" and receipt[
+            "response_id"
+        ] != _empty_receipt_id(state, f"broad:{form}", receipt):
+            raise HelperError("An attested empty broad-search receipt has invalid scope.")
+
+    for form, failure in state["broad_failures"].items():
+        if (
+            form not in expected_forms
+            or form in state["broad_searches"]
+            or not _valid_query_receipt(failure)
+            or failure.get("expected_form") != form
+            or failure.get("date_from") != scope.get("date_from")
+            or failure.get("date_to") != scope.get("date_to")
+            or failure.get("reason") not in BROAD_FAILURE_REASONS
+        ):
+            raise HelperError("The coverage state contains an invalid broad-search failure.")
+
+    receipt_surfaced = {
+        cik
+        for receipt in state["broad_searches"].values()
+        for cik in receipt["surfaced_ciks"]
+    }
+
+    if set(state["broad_surfaced"]) != receipt_surfaced:
+        raise HelperError("The broad-search filer union does not match its form receipts.")
+
+    for cik, receipt in state["individually_checked"].items():
+        if cik not in known_ciks or not _valid_query_receipt(receipt):
+            raise HelperError("The coverage state contains an invalid ticker-search receipt.")
+
+        receipt_ticker = _qualified_ticker(receipt.get("ticker"))
+
+        if (
+            receipt_ticker is None
+            or not _valid_non_negative_integer(receipt.get("result_count"))
+            or not _valid_response_id(receipt.get("response_id"))
+            or receipt.get("receipt_kind")
+            not in {"validated_result_artifact", "agent_attested_empty"}
+            or receipt.get("date_from") != scope.get("date_from")
+            or receipt.get("date_to") != scope.get("date_to")
+            or receipt_ticker.upper()
+            not in {value.upper() for value in filers[cik]["tickers"]}
+        ):
+            raise HelperError("The coverage state contains a malformed ticker-search receipt.")
+
+        if state["consumed_responses"].get(receipt["response_id"]) != f"ticker:{cik}":
+            raise HelperError("A ticker-search receipt has an invalid response owner.")
+
+        artifact_id = receipt.get("artifact_id")
+
+        if receipt["receipt_kind"] == "validated_result_artifact":
+            if (
+                receipt["result_count"] == 0
+                or not _valid_response_id(artifact_id)
+                or state["consumed_artifacts"].get(artifact_id) != f"ticker:{cik}"
+            ):
+                raise HelperError("A ticker-search artifact receipt is invalid.")
+        elif artifact_id is not None or receipt["result_count"] != 0:
+            raise HelperError("An attested empty ticker-search receipt is invalid.")
+
+        if receipt["receipt_kind"] == "agent_attested_empty" and receipt[
+            "response_id"
+        ] != _empty_receipt_id(state, f"ticker:{cik}", receipt):
+            raise HelperError("An attested empty ticker-search receipt has invalid scope.")
+
+    response_ids = [
+        receipt["response_id"]
+        for receipt in list(state["broad_searches"].values())
+        + list(state["individually_checked"].values())
+    ]
+
+    if len(response_ids) != len(set(response_ids)):
+        raise HelperError("One saved search response is reused by multiple coverage receipts.")
+
+    valid_response_owners = {f"broad:{form}" for form in expected_forms}
+    valid_response_owners.update(f"ticker:{cik}" for cik in known_ciks)
+
+    if any(
+        not _valid_response_id(response_id) or owner not in valid_response_owners
+        for response_id, owner in state["consumed_responses"].items()
+    ):
+        raise HelperError("The coverage state contains an invalid consumed-response record.")
+
+    if set(state["consumed_responses"]) != set(response_ids):
+        raise HelperError("The consumed-response ledger does not match its search receipts.")
+
+    artifact_ids = [
+        receipt["artifact_id"]
+        for receipt in list(state["broad_searches"].values())
+        + list(state["individually_checked"].values())
+        if receipt.get("artifact_id") is not None
+    ]
+
+    if len(artifact_ids) != len(set(artifact_ids)):
+        raise HelperError("One saved artifact path is reused by multiple coverage receipts.")
+
+    if any(
+        not _valid_response_id(artifact_id) or owner not in valid_response_owners
+        for artifact_id, owner in state["consumed_artifacts"].items()
+    ):
+        raise HelperError("The coverage state contains an invalid consumed-artifact record.")
+
+    if set(state["consumed_artifacts"]) != set(artifact_ids):
+        raise HelperError("The consumed-artifact ledger does not match its search receipts.")
+
+    for cik, failure in state["failed"].items():
+        if cik not in known_ciks or not isinstance(failure, dict):
+            raise HelperError("The coverage state contains an invalid failed-filer record.")
+
+        if failure.get("reason") not in ALLOWED_FAILURE_REASONS:
+            raise HelperError("The coverage state contains an invalid failure reason.")
+
+        failure_ticker = failure.get("ticker")
+
+        if failure_ticker is not None and (
+            _qualified_ticker(failure_ticker) is None
+            or failure_ticker.upper()
+            not in {value.upper() for value in filers[cik]["tickers"]}
+        ):
+            raise HelperError("The coverage state contains an invalid failed-filer ticker.")
+
+    if not all(
+        isinstance(value, str) and FAILURE_REASON_RE.fullmatch(value)
+        for value in state["identity_issues"]
+    ):
+        raise HelperError("The coverage state contains an invalid identity issue code.")
+
+    surfaced = set(state["broad_surfaced"])
+    checked = set(state["individually_checked"])
+    failed = set(state["failed"])
+
+    if surfaced & checked or surfaced & failed or checked & failed:
+        raise HelperError("Coverage filer statuses must be mutually exclusive.")
+
+    return state
+
+
+def _write_state(path, state):
+    _validate_state(state)
 
     body = json.dumps(
         state,
@@ -941,24 +1492,7 @@ def _write_state(path, state):
 
 def _load_state(path):
     state = _load_json_value(path)
-
-    if not isinstance(state, dict) or state.get("schema_version") != COVERAGE_STATE_VERSION:
-        raise HelperError("The coverage state is missing or has an unsupported schema version.")
-
-    required_objects = ("scope", "enumeration", "accessions", "filers")
-
-    if any(not isinstance(state.get(key), dict) for key in required_objects):
-        raise HelperError("The coverage state is malformed.")
-
-    for key in ("broad_surfaced", "unexpected", "identity_issues"):
-        if not isinstance(state.get(key), list):
-            raise HelperError("The coverage state is malformed.")
-
-    for key in ("individually_checked", "failed"):
-        if not isinstance(state.get(key), dict):
-            raise HelperError("The coverage state is malformed.")
-
-    return state
+    return _validate_state(state)
 
 
 def _alias_map(state):
@@ -974,19 +1508,145 @@ def _alias_map(state):
     return aliases
 
 
-def add_broad_search_results(state, results):
-    """Record expected filers surfaced by one broad filing search artifact."""
+def _validate_result_window(state, result):
+    """Require one search result to fall inside the enumerated filing-date window."""
+    filing_date = str(result.get("filing_date") or "").strip()
+    filing_type = " ".join(str(result.get("filing_type") or "").split())
+
+    if not filing_type:
+        raise HelperError("A search result is missing a filing_type.")
+
+    try:
+        parsed_date = datetime.date.fromisoformat(filing_date)
+        date_from = datetime.date.fromisoformat(state["scope"]["date_from"])
+        date_to = datetime.date.fromisoformat(state["scope"]["date_to"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HelperError("A search result is missing a valid filing_date.") from exc
+
+    if not date_from <= parsed_date <= date_to:
+        raise HelperError("A search result falls outside the enumerated date window.")
+
+
+def add_broad_search_results(
+    state,
+    results,
+    expected_form,
+    queries,
+    *,
+    result_count=None,
+    response_id=None,
+    artifact_id=None,
+    attested_empty=False,
+):
+    """Record one scope-validated broad-search receipt and its surfaced filers."""
+    _validate_state(state)
+    expected_form = _normalized_form(expected_form)
+
+    if expected_form not in state["scope"]["expected_forms"]:
+        raise HelperError("--expected-form is not part of the enumerated form universe.")
+
+    if state["individually_checked"] or state["failed"]:
+        raise HelperError(
+            "Record every broad filing-form search before marking individual filers."
+        )
+
+    if result_count is None:
+        result_count = len(results)
+
+    if not _valid_non_negative_integer(result_count) or result_count != len(results):
+        raise HelperError("The broad-search result count does not match its results.")
+
+    existing_receipt = state["broad_searches"].get(expected_form)
+
+    if existing_receipt is not None:
+        raise HelperError(
+            "This filing form already has a broad-search receipt. Reinitialize the "
+            "ledger before replacing a recorded search."
+        )
+
+    plan = _bind_query_plan(state, queries)
+    owner = f"broad:{expected_form}"
+
+    if attested_empty:
+        if results or result_count != 0 or response_id is not None or artifact_id is not None:
+            raise HelperError(
+                "An attested empty broad search cannot include an artifact or results."
+            )
+
+        response_id = _empty_receipt_id(state, owner, plan)
+        receipt_kind = "agent_attested_empty"
+    else:
+        if result_count == 0:
+            raise HelperError(
+                "Use --empty for a successful zero-result broad search instead of an artifact."
+            )
+
+        if not _valid_response_id(response_id):
+            raise HelperError("The broad search is missing a valid saved-response receipt.")
+
+        artifact_id = artifact_id or response_id
+
+        if not _valid_response_id(artifact_id):
+            raise HelperError("The broad search is missing a valid saved-artifact receipt.")
+
+        receipt_kind = "validated_result_artifact"
+
+    if _response_id_in_use(
+        state,
+        response_id,
+        exclude=("broad", expected_form),
+    ):
+        raise HelperError("The saved search response is already bound to another coverage check.")
+
+    if _artifact_id_in_use(state, artifact_id, exclude=("broad", expected_form)):
+        raise HelperError("The saved artifact path is already bound to another coverage check.")
+
     aliases = _alias_map(state)
-    surfaced = set(state["broad_surfaced"])
-    added = set()
+    previous_surfaced = set(state["broad_surfaced"])
+    matched_ciks = set()
+    authoritative_ciks = set()
 
     for result in results:
-        source_cik, _accession = _cik_and_accession(result)
+        _validate_result_window(state, result)
+        filing_type = " ".join(str(result.get("filing_type") or "").split()).upper()
+
+        if not filing_type.startswith(expected_form):
+            raise HelperError(
+                "A broad-search result does not match its recorded filing-type prefix."
+            )
+
+        source_cik, accession = _sec_cik_and_accession(result)
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
         matched_cik = None
 
         if source_cik in state["filers"]:
+            if accession is not None:
+                accession_record = state["accessions"].get(accession)
+
+                if accession_record is None:
+                    _append_unique(state["unexpected_accessions"], accession)
+                    _append_unique(
+                        state["identity_issues"],
+                        "unexpected_in_scope_accession",
+                    )
+                    continue
+
+                if accession_record.get("cik") != source_cik:
+                    _append_unique(state["identity_issues"], "search_identity_conflict")
+                    continue
+
+                if (
+                    not accession_record.get("filing_type", "").startswith(expected_form)
+                    or accession_record.get("filing_date")
+                    != str(result.get("filing_date") or "").strip()
+                ):
+                    _append_unique(
+                        state["identity_issues"],
+                        "search_accession_metadata_mismatch",
+                    )
+                    continue
+
             if ticker_ciks and source_cik not in ticker_ciks:
                 _append_unique(state["identity_issues"], "search_identity_conflict")
                 continue
@@ -1001,6 +1661,9 @@ def add_broad_search_results(state, results):
                 aliases.setdefault(ticker.upper(), set()).add(source_cik)
             matched_cik = source_cik
 
+            if accession is not None:
+                authoritative_ciks.add(source_cik)
+
         elif source_cik and ticker_ciks:
             _append_unique(state["identity_issues"], "search_identity_conflict")
             continue
@@ -1013,8 +1676,9 @@ def add_broad_search_results(state, results):
             continue
 
         if matched_cik:
-            surfaced.add(matched_cik)
-            added.add(matched_cik)
+            matched_ciks.add(matched_cik)
+            state["failed"].pop(matched_cik, None)
+            state["individually_checked"].pop(matched_cik, None)
         else:
             unexpected = {
                 "cik": source_cik,
@@ -1023,16 +1687,75 @@ def add_broad_search_results(state, results):
 
             if unexpected not in state["unexpected"]:
                 state["unexpected"].append(unexpected)
+            _append_unique(state["identity_issues"], "unexpected_in_scope_filer")
+    state["broad_searches"][expected_form] = {
+        **plan,
+        "response_id": response_id,
+        "artifact_id": artifact_id,
+        "receipt_kind": receipt_kind,
+        "expected_form": expected_form,
+        "date_from": state["scope"]["date_from"],
+        "date_to": state["scope"]["date_to"],
+        "result_count": result_count,
+        "surfaced_ciks": sorted(matched_ciks),
+        "authoritative_ciks": sorted(authoritative_ciks),
+    }
+    state["broad_failures"].pop(expected_form, None)
+    state["consumed_responses"][response_id] = owner
 
-    state["broad_surfaced"] = sorted(surfaced)
-    return len(added)
+    if artifact_id is not None:
+        state["consumed_artifacts"][artifact_id] = owner
+    state["broad_surfaced"] = sorted(
+        {
+            cik
+            for receipt in state["broad_searches"].values()
+            for cik in receipt["surfaced_ciks"]
+        }
+    )
+    return len(set(state["broad_surfaced"]) - previous_surfaced)
+
+
+def fail_broad_search(state, expected_form, queries, reason):
+    """Record one terminal form-scoped retrieval failure without faking a receipt."""
+    _validate_state(state)
+    expected_form = _normalized_form(expected_form)
+
+    if expected_form not in state["scope"]["expected_forms"]:
+        raise HelperError("--expected-form is not part of the enumerated form universe.")
+
+    if expected_form in state["broad_searches"]:
+        raise HelperError("This filing form already has a successful broad-search receipt.")
+
+    if state["individually_checked"] or state["failed"]:
+        raise HelperError(
+            "Record every broad filing-form result before marking individual filers."
+        )
+
+    reason = str(reason or "").strip().lower()
+
+    if reason not in BROAD_FAILURE_REASONS:
+        raise HelperError(
+            "--reason must be one of: artifact_unavailable, malformed_response, "
+            "rate_limited, timeout."
+        )
+
+    plan = _bind_query_plan(state, queries)
+    state["broad_failures"][expected_form] = {
+        **plan,
+        "expected_form": expected_form,
+        "date_from": state["scope"]["date_from"],
+        "date_to": state["scope"]["date_to"],
+        "reason": reason,
+    }
+    return expected_form
 
 
 def _missing_ciks(state):
     expected = set(state["filers"])
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
-    return sorted(expected - surfaced - checked)
+    failed = set(state["failed"])
+    return sorted(expected - surfaced - checked - failed)
 
 
 def missing_filers(state, *, offset=0, limit=MAX_COVERAGE_ROWS):
@@ -1076,20 +1799,179 @@ def _resolve_state_ticker(state, value):
     return ticker, next(iter(matches))
 
 
-def mark_filer(state, ticker_value, status, reason=None):
-    """Record one completed or failed ticker-scoped follow-up."""
-    ticker, cik = _resolve_state_ticker(state, ticker_value)
+def _resolve_state_cik(state, value):
+    cik = _valid_cik(value)
+
+    if cik is None or cik not in state["filers"]:
+        raise HelperError("--cik must identify one enumerated filer.")
+
+    return cik
+
+
+def bind_resolved_ticker(state, cik_value, ticker_value):
+    """Bind one independently resolved exchange-qualified ticker to a census filer."""
+    _validate_state(state)
+    cik = _resolve_state_cik(state, cik_value)
+    ticker = _qualified_ticker(ticker_value)
+
+    if ticker is None:
+        raise HelperError("--ticker must be one exchange-qualified ticker.")
+
+    filer = state["filers"][cik]
+
+    if filer.get("search_ticker") is not None:
+        raise HelperError("This filer already has a selected search ticker.")
+
+    owners = _alias_map(state).get(ticker.upper(), set())
+
+    if owners and owners != {cik}:
+        raise HelperError("The resolved ticker is already assigned to another census filer.")
+
+    if cik in state["individually_checked"]:
+        raise HelperError("This filer already has an individual-search receipt.")
+
+    failure = state["failed"].get(cik)
+
+    if failure is not None and failure.get("reason") != "unresolved_ticker":
+        raise HelperError("Resolve the filer's existing non-ticker failure before binding a ticker.")
+
+    if ticker.upper() not in {value.upper() for value in filer["tickers"]}:
+        filer["tickers"].append(ticker)
+
+    filer["search_ticker"] = ticker
+    state["failed"].pop(cik, None)
+    return cik, ticker
+
+
+def _validate_ticker_search_results(state, cik, results):
+    aliases = _alias_map(state)
+
+    for result in results:
+        _validate_result_window(state, result)
+        source_cik, _accession = _sec_cik_and_accession(result)
+        ticker = _qualified_ticker(result.get("ticker"))
+        ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
+
+        if source_cik is not None:
+            if source_cik != cik or (ticker_ciks and cik not in ticker_ciks):
+                raise HelperError(
+                    "A ticker-search result belongs to a different filer than --ticker."
+                )
+        elif cik not in ticker_ciks:
+            raise HelperError(
+                "A ticker-search result cannot be tied to the requested enumerated filer."
+            )
+
+
+def mark_filer(
+    state,
+    ticker_value,
+    status,
+    reason=None,
+    *,
+    cik_value=None,
+    results=None,
+    result_count=None,
+    queries=None,
+    response_id=None,
+    artifact_id=None,
+    attested_empty=False,
+):
+    """Record one saved-response-backed ticker check or one terminal failed attempt."""
+    _validate_state(state)
+
+    if ticker_value is not None:
+        ticker, cik = _resolve_state_ticker(state, ticker_value)
+    else:
+        ticker = None
+        cik = _resolve_state_cik(state, cik_value)
+
+    if status not in {"checked", "failed"}:
+        raise HelperError("--status must be checked or failed.")
+
+    if cik in state["broad_surfaced"]:
+        raise HelperError("This filer was already satisfied by a broad-search receipt.")
+
+    if cik in state["individually_checked"]:
+        raise HelperError("This filer already has an individual-search receipt.")
+
+    if cik not in _missing_ciks(state) and cik not in state["failed"]:
+        raise HelperError("Only a pending or previously failed filer can be marked.")
 
     if status == "checked":
-        state["individually_checked"][cik] = {"ticker": ticker}
+        if ticker is None:
+            raise HelperError("--ticker is required when --status checked.")
+
+        if results is None or result_count is None or queries is None:
+            raise HelperError(
+                "A checked filer requires a saved search response and the thematic queries."
+            )
+
+        if not _valid_non_negative_integer(result_count) or result_count != len(results):
+            raise HelperError("The ticker-search result count does not match its results.")
+
+        plan = _bind_query_plan(state, queries)
+        owner = f"ticker:{cik}"
+
+        if attested_empty:
+            if results or result_count != 0 or response_id is not None or artifact_id is not None:
+                raise HelperError(
+                    "An attested empty ticker search cannot include an artifact or results."
+                )
+
+            response_id = _empty_receipt_id(state, owner, plan)
+            receipt_kind = "agent_attested_empty"
+        else:
+            if result_count == 0:
+                raise HelperError(
+                    "Use --empty for a successful zero-result ticker search instead of an artifact."
+                )
+
+            if not _valid_response_id(response_id):
+                raise HelperError("The ticker search is missing a valid saved-response receipt.")
+
+            artifact_id = artifact_id or response_id
+
+            if not _valid_response_id(artifact_id):
+                raise HelperError("The ticker search is missing a valid saved-artifact receipt.")
+
+            receipt_kind = "validated_result_artifact"
+
+        if _response_id_in_use(state, response_id, exclude=("ticker", cik)):
+            raise HelperError(
+                "The saved search response is already bound to another coverage check."
+            )
+
+        if _artifact_id_in_use(state, artifact_id, exclude=("ticker", cik)):
+            raise HelperError("The saved artifact path is already bound to another coverage check.")
+
+        _validate_ticker_search_results(state, cik, results)
+        state["individually_checked"][cik] = {
+            **plan,
+            "ticker": ticker,
+            "response_id": response_id,
+            "artifact_id": artifact_id,
+            "receipt_kind": receipt_kind,
+            "date_from": state["scope"]["date_from"],
+            "date_to": state["scope"]["date_to"],
+            "result_count": result_count,
+        }
+        state["consumed_responses"][response_id] = owner
+
+        if artifact_id is not None:
+            state["consumed_artifacts"][artifact_id] = owner
+
         state["failed"].pop(cik, None)
     else:
+        if reason is None:
+            raise HelperError("--reason is required when --status failed.")
+
         reason = str(reason or "unspecified").strip().lower()
 
-        if not FAILURE_REASON_RE.fullmatch(reason):
+        if reason not in ALLOWED_FAILURE_REASONS:
             raise HelperError(
-                "--reason must be a short lowercase issue code using letters, numbers, "
-                "underscores, or hyphens."
+                "--reason must be one of: artifact_unavailable, malformed_response, "
+                "rate_limited, timeout, unresolved_ticker."
             )
 
         if cik not in state["individually_checked"]:
@@ -1099,11 +1981,44 @@ def mark_filer(state, ticker_value, status, reason=None):
 
 
 def coverage_audit(state):
-    """Return a compact coverage audit and whether every expected filer was checked."""
+    """Return a compact audit of recorded checks for every expected filer."""
+    _validate_state(state)
     enumeration = state["enumeration"]
     scope = state["scope"]
     inconsistencies = list(dict.fromkeys(state["identity_issues"]))
+    warnings = []
     accession_count = len(state["accessions"])
+    ticker_identity_is_resolved = all(
+        _qualified_ticker(filer.get("search_ticker")) is not None
+        or cik in state["broad_surfaced"]
+        for cik, filer in state["filers"].items()
+    )
+
+    if ticker_identity_is_resolved:
+        inconsistencies = [
+            value
+            for value in inconsistencies
+            if value not in {"malformed_ticker_alias", "malformed_ticker_aliases"}
+        ]
+
+    alias_owners = _alias_map(state)
+    ambiguous_ciks = {
+        cik
+        for owners in alias_owners.values()
+        if len(owners) > 1
+        for cik in owners
+    }
+    authoritative_ciks = {
+        cik
+        for receipt in state["broad_searches"].values()
+        for cik in receipt["authoritative_ciks"]
+    }
+
+    if ambiguous_ciks and ambiguous_ciks <= authoritative_ciks:
+        inconsistencies = [
+            value for value in inconsistencies if value != "ambiguous_ticker_alias"
+        ]
+        warnings.append("ambiguous_ticker_alias_resolved_by_cik")
 
     if enumeration.get("result_level") != "accession":
         _append_unique(inconsistencies, "invalid_result_level")
@@ -1126,13 +2041,46 @@ def coverage_audit(state):
     if enumeration.get("accession_count") != accession_count:
         _append_unique(inconsistencies, "accession_count_mismatch")
 
+    if state["unexpected"]:
+        _append_unique(inconsistencies, "unexpected_in_scope_filer")
+
+    if state["unexpected_accessions"]:
+        _append_unique(inconsistencies, "unexpected_in_scope_accession")
+
+    if state["broad_failures"]:
+        _append_unique(inconsistencies, "broad_search_failed")
+
     if scope.get("days") not in (1, 2, 3):
         _append_unique(inconsistencies, "unsupported_date_window")
+
+    expected_forms = set(scope.get("expected_forms") or [])
+    recorded_forms = set(state["broad_searches"])
+    search_plan = state.get("search_plan")
+
+    if state["filers"] and recorded_forms != expected_forms:
+        _append_unique(inconsistencies, "missing_broad_search_receipt")
+
+    if state["filers"] and search_plan is None:
+        _append_unique(inconsistencies, "missing_search_plan")
+    elif search_plan is not None:
+        receipts = (
+            list(state["broad_searches"].values())
+            + list(state["broad_failures"].values())
+            + list(state["individually_checked"].values())
+        )
+
+        if any(
+            receipt.get("query_hash") != search_plan.get("query_hash")
+            or receipt.get("query_count") != search_plan.get("query_count")
+            for receipt in receipts
+        ):
+            _append_unique(inconsistencies, "search_plan_mismatch")
 
     unsearchable = sorted(
         cik
         for cik, filer in state["filers"].items()
         if _qualified_ticker(filer.get("search_ticker")) is None
+        and cik not in state["broad_surfaced"]
     )
     missing = _missing_ciks(state)
     failed = sorted(state["failed"])
@@ -1145,11 +2093,21 @@ def coverage_audit(state):
         "date_to": scope.get("date_to"),
         "accession_count": accession_count,
         "filer_count": len(state["filers"]),
+        "broad_search_form_count": len(state["broad_searches"]),
+        "broad_search_failure_count": len(state["broad_failures"]),
+        "broad_search_failures": [
+            {"filing_type": form, "reason": failure["reason"]}
+            for form, failure in sorted(state["broad_failures"].items())
+        ],
         "broad_search_filer_count": len(set(state["broad_surfaced"])),
         "individually_checked_filer_count": len(state["individually_checked"]),
         "failed_filer_count": len(failed),
         "unsearchable_filer_count": len(unsearchable),
         "unpolled_filer_count": len(missing),
+        "unexpected_filer_count": len(state["unexpected"]),
+        "unexpected_accession_count": len(state["unexpected_accessions"]),
+        "request_binding": "agent_attested",
+        "warnings": warnings,
         "coverage_issues": enumeration.get("issues") or [],
         "inconsistencies": inconsistencies,
     }
@@ -1198,21 +2156,54 @@ def _argument_parser():
         action="store_true",
         help="Read one enumeration capability URL from stdin and download it.",
     )
+    coverage_init.add_argument(
+        "--save",
+        type=Path,
+        help="Save the fetched census so the ledger can be reset without re-enumerating.",
+    )
 
     coverage_add_search = subparsers.add_parser("coverage-add-search")
     coverage_add_search.add_argument("--state", type=Path, required=True)
-    coverage_add_search.add_argument("--artifact", type=Path, required=True)
+    coverage_add_search.add_argument("--expected-form", required=True)
+    broad_source = coverage_add_search.add_mutually_exclusive_group(required=True)
+    broad_source.add_argument("--artifact", type=Path)
+    broad_source.add_argument(
+        "--empty",
+        action="store_true",
+        help="Attest that the just-completed scoped search returned count=0.",
+    )
+    broad_source.add_argument(
+        "--failed",
+        action="store_true",
+        help="Record a terminal form-scoped search failure after bounded retries.",
+    )
+    coverage_add_search.add_argument("--reason")
+    coverage_add_search.add_argument("--query", action="append", required=True)
 
     coverage_missing = subparsers.add_parser("coverage-missing")
     coverage_missing.add_argument("--state", type=Path, required=True)
     coverage_missing.add_argument("--limit", type=int, default=MAX_COVERAGE_ROWS)
     coverage_missing.add_argument("--offset", type=int, default=0)
 
+    coverage_bind_ticker = subparsers.add_parser("coverage-bind-ticker")
+    coverage_bind_ticker.add_argument("--state", type=Path, required=True)
+    coverage_bind_ticker.add_argument("--cik", required=True)
+    coverage_bind_ticker.add_argument("--ticker", required=True)
+
     coverage_mark = subparsers.add_parser("coverage-mark")
     coverage_mark.add_argument("--state", type=Path, required=True)
-    coverage_mark.add_argument("--ticker", required=True)
+    coverage_identity = coverage_mark.add_mutually_exclusive_group(required=True)
+    coverage_identity.add_argument("--ticker")
+    coverage_identity.add_argument("--cik")
     coverage_mark.add_argument("--status", choices=("checked", "failed"), required=True)
     coverage_mark.add_argument("--reason")
+    coverage_mark.add_argument("--artifact", type=Path)
+    coverage_mark.add_argument(
+        "--empty",
+        action="store_true",
+        help="Attest that the just-completed scoped ticker search returned count=0.",
+    )
+    coverage_mark.add_argument("--query", action="append")
 
     coverage_audit_parser = subparsers.add_parser("coverage-audit")
     coverage_audit_parser.add_argument("--state", type=Path, required=True)
@@ -1274,6 +2265,12 @@ def main(argv=None):
             expected_forms = _normalized_expected_forms(arguments.expected_form)
 
             if arguments.fetch:
+                if arguments.save is None:
+                    raise HelperError("--save is required with coverage-init --fetch.")
+
+                if arguments.save.resolve() == arguments.state.resolve():
+                    raise HelperError("--save and --state must use different paths.")
+
                 url = sys.stdin.read().strip()
                 body = fetch_artifact_bytes(url)
 
@@ -1284,13 +2281,28 @@ def main(argv=None):
                         "The downloaded enumeration artifact is not valid UTF-8 JSON."
                     ) from exc
             else:
+                if arguments.save is not None:
+                    raise HelperError("--save is accepted only with coverage-init --fetch.")
+
+                if arguments.artifact.resolve() == arguments.state.resolve():
+                    raise HelperError(
+                        "The census --artifact and --state must use different paths."
+                    )
+
                 payload = _load_json_value(arguments.artifact)
 
             state = _enumeration_state(payload, expected_forms)
+
+            if arguments.fetch:
+                _write_atomic(arguments.save, body)
+
             _write_state(arguments.state, state)
             output = {
                 "enumeration_complete": state["enumeration"]["coverage_complete"],
                 "as_of": state["enumeration"]["as_of"],
+                "date_from": state["scope"]["date_from"],
+                "date_to": state["scope"]["date_to"],
+                "days": state["scope"]["days"],
                 "selected_forms": state["scope"]["expected_forms"],
                 "accession_count": len(state["accessions"]),
                 "filer_count": len(state["filers"]),
@@ -1301,11 +2313,54 @@ def main(argv=None):
 
         elif arguments.command == "coverage-add-search":
             state = _load_state(arguments.state)
-            results = load_artifact(arguments.artifact)
-            added_count = add_broad_search_results(state, results)
+
+            if arguments.failed:
+                if arguments.reason is None:
+                    raise HelperError("--reason is required with --failed.")
+
+                recorded_form = fail_broad_search(
+                    state,
+                    arguments.expected_form,
+                    arguments.query,
+                    arguments.reason,
+                )
+                added_count = 0
+            elif arguments.empty:
+                if arguments.reason is not None:
+                    raise HelperError("--reason is accepted only with --failed.")
+
+                results = []
+                result_count = 0
+                response_id = None
+                artifact_id = None
+            else:
+                if arguments.reason is not None:
+                    raise HelperError("--reason is accepted only with --failed.")
+
+                results, result_count, response_id, artifact_id = load_search_response(
+                    arguments.artifact
+                )
+
+            if not arguments.failed:
+                added_count = add_broad_search_results(
+                    state,
+                    results,
+                    arguments.expected_form,
+                    arguments.query,
+                    result_count=result_count,
+                    response_id=response_id,
+                    artifact_id=artifact_id,
+                    attested_empty=arguments.empty,
+                )
+                recorded_form = _normalized_form(arguments.expected_form)
+
             _write_state(arguments.state, state)
             output = {
                 "added_filer_count": added_count,
+                "recorded_form": recorded_form,
+                "status": "failed" if arguments.failed else "recorded",
+                "broad_search_form_count": len(state["broad_searches"]),
+                "broad_search_failure_count": len(state["broad_failures"]),
                 "broad_search_filer_count": len(state["broad_surfaced"]),
                 "missing_filer_count": len(_missing_ciks(state)),
                 "unexpected_filer_count": len(state["unexpected"]),
@@ -1320,13 +2375,76 @@ def main(argv=None):
                 limit=arguments.limit,
             )
 
+        elif arguments.command == "coverage-bind-ticker":
+            state = _load_state(arguments.state)
+            cik, ticker = bind_resolved_ticker(
+                state,
+                arguments.cik,
+                arguments.ticker,
+            )
+            _write_state(arguments.state, state)
+            output = {
+                "cik": cik,
+                "ticker": ticker,
+                "status": "bound",
+                "missing_filer_count": len(_missing_ciks(state)),
+            }
+
         elif arguments.command == "coverage-mark":
             state = _load_state(arguments.state)
+
+            if arguments.status == "checked":
+                if arguments.reason is not None:
+                    raise HelperError("--reason is accepted only when --status failed.")
+
+                if arguments.artifact is not None and arguments.empty:
+                    raise HelperError(
+                        "Use exactly one of --artifact or --empty when --status checked."
+                    )
+
+                if arguments.artifact is None and not arguments.empty:
+                    raise HelperError(
+                        "Use --artifact for non-empty results or --empty for count=0 when "
+                        "--status checked."
+                    )
+
+                if arguments.empty:
+                    results = []
+                    result_count = 0
+                    response_id = None
+                    artifact_id = None
+                else:
+                    results, result_count, response_id, artifact_id = load_search_response(
+                        arguments.artifact
+                    )
+            else:
+                if (
+                    arguments.artifact is not None
+                    or arguments.empty
+                    or arguments.query is not None
+                ):
+                    raise HelperError(
+                        "--artifact, --empty, and --query are accepted only when "
+                        "--status checked."
+                    )
+
+                results = None
+                result_count = None
+                response_id = None
+                artifact_id = None
+
             cik = mark_filer(
                 state,
                 arguments.ticker,
                 arguments.status,
                 arguments.reason,
+                cik_value=arguments.cik,
+                results=results,
+                result_count=result_count,
+                queries=arguments.query,
+                response_id=response_id,
+                artifact_id=artifact_id,
+                attested_empty=arguments.empty,
             )
             _write_state(arguments.state, state)
             output = {
