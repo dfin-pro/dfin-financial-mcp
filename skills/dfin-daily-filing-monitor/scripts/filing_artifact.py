@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -26,10 +27,17 @@ SEC_SOURCE_RE = re.compile(
 NAME_CIK_RE = re.compile(r"\bCIK\s*0*(\d+)\b", re.IGNORECASE)
 KNOWN_FORMS = ("10-K", "10-Q", "20-F", "8-K", "6-K")
 QUALIFIED_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9._/-]*\.[A-Z0-9]{2,8}$")
+CIK_RE = re.compile(r"^[0-9]{1,10}$")
+ACCESSION_RE = re.compile(r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
+FAILURE_REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+FORM_PREFIX_RE = re.compile(r"^[A-Z0-9][A-Z0-9 /-]{0,49}$")
+CAPABILITY_URL_FRAGMENT = "www.dfin.pro/api/v1/artifacts/"
 DEFAULT_PREVIEW_CHARS = 220
 DEFAULT_EVIDENCE_CHARS = 800
 MAX_SUMMARIES = 15
 MAX_DOC_UUIDS = 20
+MAX_COVERAGE_ROWS = 50
+COVERAGE_STATE_VERSION = 1
 
 
 class HelperError(Exception):
@@ -591,6 +599,563 @@ def select_bundles(
     return selected
 
 
+def _load_json_value(path):
+    """Read one saved UTF-8 JSON value without normalizing its envelope."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HelperError(f"Could not read the saved JSON input: {exc}.") from None
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HelperError(
+            f"Invalid JSON input at line {exc.lineno}, column {exc.colno}."
+        ) from None
+
+
+def _decode_envelope(value):
+    """Decode common MCP wrappers around one response object."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HelperError("The coverage response is not valid JSON.") from exc
+
+    if isinstance(value, dict) and set(value) == {"text"}:
+        return _decode_envelope(value["text"])
+
+    if (
+        isinstance(value, dict)
+        and set(value) == {"result"}
+        and isinstance(value["result"], (dict, str))
+    ):
+        return _decode_envelope(value["result"])
+
+    if not isinstance(value, dict):
+        raise HelperError("The coverage response must be a JSON object.")
+
+    return value
+
+
+def _normalized_form(value):
+    """Return one non-empty uppercase form prefix."""
+    form = " ".join(str(value or "").split()).upper()
+
+    if not FORM_PREFIX_RE.fullmatch(form):
+        raise HelperError("Every expected form must be a non-empty form prefix.")
+
+    return form
+
+
+def _normalized_expected_forms(values):
+    """Normalize and deduplicate expected form prefixes in caller order."""
+    forms = []
+
+    for value in values or []:
+        form = _normalized_form(value)
+
+        if form not in forms:
+            forms.append(form)
+
+    if not forms:
+        raise HelperError("At least one --expected-form value is required.")
+
+    return forms
+
+
+def _valid_non_negative_integer(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _valid_cik(value):
+    text = str(value or "").strip()
+    return text.zfill(10) if CIK_RE.fullmatch(text) else None
+
+
+def _date_window(filters):
+    """Return validated inclusive date bounds limited to three calendar days."""
+    try:
+        date_from = datetime.date.fromisoformat(str(filters.get("date_from") or ""))
+        date_to = datetime.date.fromisoformat(str(filters.get("date_to") or ""))
+    except ValueError as exc:
+        raise HelperError(
+            "The enumeration response must include valid date_from and date_to filters."
+        ) from exc
+
+    days = (date_to - date_from).days + 1
+
+    if not 1 <= days <= 3:
+        raise HelperError(
+            "The daily filing monitor supports inclusive windows of one to three calendar days."
+        )
+
+    response_days = filters.get("days")
+
+    if response_days != days:
+        raise HelperError(
+            "The enumeration days filter does not match its inclusive date window."
+        )
+
+    return date_from.isoformat(), date_to.isoformat(), days
+
+
+def _append_unique(values, value):
+    if value not in values:
+        values.append(value)
+
+
+def _enumeration_state(payload, expected_forms):
+    """Build a coverage ledger from one accession-level enumeration response."""
+    response = _decode_envelope(payload)
+    filters = response.get("filters")
+    coverage = response.get("coverage")
+    results = response.get("results")
+
+    if not isinstance(filters, dict) or not isinstance(coverage, dict):
+        raise HelperError("The enumeration response is missing filters or coverage metadata.")
+
+    if not isinstance(results, list):
+        raise HelperError("The enumeration response must contain a results array.")
+
+    if response.get("result_level") != "accession" or filters.get("result_level") != "accession":
+        raise HelperError("Run list_latest_filings with result_level='accession'.")
+
+    if filters.get("limit") != -1:
+        raise HelperError("Run list_latest_filings with limit=-1 for complete enumeration.")
+
+    if filters.get("ticker") not in (None, ""):
+        raise HelperError("The coverage census must omit ticker and enumerate all selected filers.")
+
+    if filters.get("data_in_db_only") is not False:
+        raise HelperError("Run list_latest_filings with data_in_db_only=false.")
+
+    response_forms = _normalized_expected_forms(filters.get("filing_types"))
+
+    if set(response_forms) != set(expected_forms):
+        raise HelperError(
+            "The enumeration filing_types do not match the expected form universe."
+        )
+
+    date_from, date_to, days = _date_window(filters)
+    window_start = datetime.date.fromisoformat(date_from)
+    window_end = datetime.date.fromisoformat(date_to)
+    inconsistencies = []
+    accessions = {}
+    filers = {}
+
+    for row in results:
+        if not isinstance(row, dict):
+            _append_unique(inconsistencies, "malformed_accession_row")
+            continue
+
+        accession = str(row.get("accession_number") or "").strip()
+        cik = _valid_cik(row.get("cik"))
+        filing_type = " ".join(str(row.get("filing_type") or "").split()).upper()
+        filing_date = str(row.get("filing_date") or "").strip()
+
+        if not ACCESSION_RE.fullmatch(accession) or cik is None or not filing_type:
+            _append_unique(inconsistencies, "malformed_accession_row")
+            continue
+
+        try:
+            parsed_filing_date = datetime.date.fromisoformat(filing_date)
+        except ValueError:
+            _append_unique(inconsistencies, "malformed_accession_row")
+            continue
+
+        if not window_start <= parsed_filing_date <= window_end:
+            _append_unique(inconsistencies, "accession_outside_window")
+
+        if not any(filing_type.startswith(form) for form in expected_forms):
+            _append_unique(inconsistencies, "unexpected_filing_type")
+
+        existing_accession = accessions.get(accession)
+        accession_record = {
+            "cik": cik,
+            "filing_type": filing_type,
+            "filing_date": filing_date,
+        }
+
+        if existing_accession is not None:
+            if existing_accession != accession_record:
+                _append_unique(inconsistencies, "conflicting_accession_identity")
+            continue
+
+        accessions[accession] = accession_record
+        filer = filers.setdefault(
+            cik,
+            {
+                "cik": cik,
+                "issuer_name": str(row.get("issuer_name") or ""),
+                "tickers": [],
+                "search_ticker": None,
+                "accessions": [],
+                "filing_types": [],
+                "filing_dates": [],
+            },
+        )
+        _append_unique(filer["accessions"], accession)
+        _append_unique(filer["filing_types"], filing_type)
+        _append_unique(filer["filing_dates"], filing_date)
+        tickers = row.get("tickers")
+
+        if not isinstance(tickers, list):
+            _append_unique(inconsistencies, "malformed_ticker_aliases")
+            tickers = []
+
+        known_tickers = {value.upper() for value in filer["tickers"]}
+
+        for ticker_value in tickers:
+            ticker = _qualified_ticker(ticker_value)
+
+            if ticker is None:
+                _append_unique(inconsistencies, "malformed_ticker_alias")
+                continue
+
+            canonical_ticker = ticker.upper()
+
+            if canonical_ticker not in known_tickers:
+                filer["tickers"].append(ticker)
+                known_tickers.add(canonical_ticker)
+
+            if filer["search_ticker"] is None:
+                filer["search_ticker"] = ticker
+
+    alias_owners = {}
+
+    for cik, filer in filers.items():
+        for ticker in filer["tickers"]:
+            alias_owners.setdefault(ticker.upper(), set()).add(cik)
+
+    if any(len(owners) > 1 for owners in alias_owners.values()):
+        _append_unique(inconsistencies, "ambiguous_ticker_alias")
+
+    count = response.get("count")
+    total_count = response.get("total_count")
+    accession_count = coverage.get("accession_count")
+
+    for value in (count, total_count, accession_count):
+        if not _valid_non_negative_integer(value):
+            raise HelperError("Enumeration counts must be non-negative integers.")
+
+    if len(results) != count:
+        _append_unique(inconsistencies, "returned_count_mismatch")
+
+    if len(accessions) != accession_count:
+        _append_unique(inconsistencies, "accession_count_mismatch")
+
+    if total_count != accession_count:
+        _append_unique(inconsistencies, "total_count_mismatch")
+
+    issues = coverage.get("issues")
+
+    if not isinstance(issues, list) or not all(
+        isinstance(value, str) and FAILURE_REASON_RE.fullmatch(value)
+        for value in issues
+    ):
+        raise HelperError("coverage.issues must be an array of issue codes.")
+
+    by_filing_type = coverage.get("by_filing_type")
+
+    if not isinstance(by_filing_type, dict):
+        raise HelperError("coverage.by_filing_type must be an object.")
+
+    if not all(
+        isinstance(key, str) and _valid_non_negative_integer(value)
+        for key, value in by_filing_type.items()
+    ):
+        raise HelperError("coverage.by_filing_type must contain non-negative counts.")
+
+    if sum(by_filing_type.values()) != accession_count:
+        _append_unique(inconsistencies, "filing_type_count_mismatch")
+
+    as_of = coverage.get("as_of")
+
+    if not isinstance(as_of, str) or not as_of.strip():
+        _append_unique(inconsistencies, "missing_as_of")
+    else:
+        try:
+            datetime.datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            _append_unique(inconsistencies, "malformed_as_of")
+
+    state = {
+        "schema_version": COVERAGE_STATE_VERSION,
+        "scope": {
+            "expected_forms": expected_forms,
+            "date_from": date_from,
+            "date_to": date_to,
+            "days": days,
+        },
+        "enumeration": {
+            "result_level": response.get("result_level"),
+            "count": count,
+            "total_count": total_count,
+            "has_more": response.get("has_more"),
+            "coverage_complete": coverage.get("complete"),
+            "as_of": as_of,
+            "accession_count": accession_count,
+            "by_filing_type": by_filing_type,
+            "issues": issues,
+        },
+        "accessions": accessions,
+        "filers": filers,
+        "broad_surfaced": [],
+        "individually_checked": {},
+        "failed": {},
+        "unexpected": [],
+        "identity_issues": inconsistencies,
+    }
+    return state
+
+
+def _contains_capability_url(value):
+    if isinstance(value, str):
+        return CAPABILITY_URL_FRAGMENT in value.lower()
+
+    if isinstance(value, dict):
+        return any(
+            _contains_capability_url(key) or _contains_capability_url(item)
+            for key, item in value.items()
+        )
+
+    if isinstance(value, list):
+        return any(_contains_capability_url(item) for item in value)
+
+    return False
+
+
+def _write_state(path, state):
+    if _contains_capability_url(state):
+        raise HelperError("Capability URLs cannot be written to coverage state.")
+
+    body = json.dumps(
+        state,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    _write_atomic(path, body)
+
+
+def _load_state(path):
+    state = _load_json_value(path)
+
+    if not isinstance(state, dict) or state.get("schema_version") != COVERAGE_STATE_VERSION:
+        raise HelperError("The coverage state is missing or has an unsupported schema version.")
+
+    required_objects = ("scope", "enumeration", "accessions", "filers")
+
+    if any(not isinstance(state.get(key), dict) for key in required_objects):
+        raise HelperError("The coverage state is malformed.")
+
+    for key in ("broad_surfaced", "unexpected", "identity_issues"):
+        if not isinstance(state.get(key), list):
+            raise HelperError("The coverage state is malformed.")
+
+    for key in ("individually_checked", "failed"):
+        if not isinstance(state.get(key), dict):
+            raise HelperError("The coverage state is malformed.")
+
+    return state
+
+
+def _alias_map(state):
+    aliases = {}
+
+    for cik, filer in state["filers"].items():
+        for value in filer.get("tickers") or []:
+            ticker = _qualified_ticker(value)
+
+            if ticker:
+                aliases.setdefault(ticker.upper(), set()).add(cik)
+
+    return aliases
+
+
+def add_broad_search_results(state, results):
+    """Record expected filers surfaced by one broad filing search artifact."""
+    aliases = _alias_map(state)
+    surfaced = set(state["broad_surfaced"])
+    added = set()
+
+    for result in results:
+        source_cik, _accession = _cik_and_accession(result)
+        ticker = _qualified_ticker(result.get("ticker"))
+        ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
+        matched_cik = None
+
+        if source_cik in state["filers"]:
+            if ticker_ciks and source_cik not in ticker_ciks:
+                _append_unique(state["identity_issues"], "search_identity_conflict")
+                continue
+
+            if ticker and not ticker_ciks:
+                filer = state["filers"][source_cik]
+                filer["tickers"].append(ticker)
+
+                if filer.get("search_ticker") is None:
+                    filer["search_ticker"] = ticker
+
+                aliases.setdefault(ticker.upper(), set()).add(source_cik)
+            matched_cik = source_cik
+
+        elif source_cik and ticker_ciks:
+            _append_unique(state["identity_issues"], "search_identity_conflict")
+            continue
+
+        elif len(ticker_ciks) == 1:
+            matched_cik = next(iter(ticker_ciks))
+
+        elif len(ticker_ciks) > 1:
+            _append_unique(state["identity_issues"], "ambiguous_ticker_alias")
+            continue
+
+        if matched_cik:
+            surfaced.add(matched_cik)
+            added.add(matched_cik)
+        else:
+            unexpected = {
+                "cik": source_cik,
+                "ticker": ticker,
+            }
+
+            if unexpected not in state["unexpected"]:
+                state["unexpected"].append(unexpected)
+
+    state["broad_surfaced"] = sorted(surfaced)
+    return len(added)
+
+
+def _missing_ciks(state):
+    expected = set(state["filers"])
+    surfaced = set(state["broad_surfaced"])
+    checked = set(state["individually_checked"])
+    return sorted(expected - surfaced - checked)
+
+
+def missing_filers(state, *, offset=0, limit=MAX_COVERAGE_ROWS):
+    """Return one bounded page of filers still requiring scoped search."""
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), MAX_COVERAGE_ROWS))
+    missing = _missing_ciks(state)
+    shown = []
+
+    for cik in missing[offset : offset + limit]:
+        filer = state["filers"][cik]
+        shown.append(
+            {
+                "cik": cik,
+                "ticker": filer.get("search_ticker"),
+                "ticker_aliases": filer.get("tickers") or [],
+                "accession_count": len(filer.get("accessions") or []),
+            }
+        )
+
+    return {
+        "missing_filer_count": len(missing),
+        "offset": offset,
+        "shown_count": len(shown),
+        "remaining_count": max(0, len(missing) - offset - len(shown)),
+        "missing": shown,
+    }
+
+
+def _resolve_state_ticker(state, value):
+    ticker = _qualified_ticker(value)
+
+    if ticker is None:
+        raise HelperError("--ticker must be an exchange-qualified ticker from coverage-missing.")
+
+    matches = _alias_map(state).get(ticker.upper(), set())
+
+    if len(matches) != 1:
+        raise HelperError("The ticker does not resolve to exactly one enumerated filer.")
+
+    return ticker, next(iter(matches))
+
+
+def mark_filer(state, ticker_value, status, reason=None):
+    """Record one completed or failed ticker-scoped follow-up."""
+    ticker, cik = _resolve_state_ticker(state, ticker_value)
+
+    if status == "checked":
+        state["individually_checked"][cik] = {"ticker": ticker}
+        state["failed"].pop(cik, None)
+    else:
+        reason = str(reason or "unspecified").strip().lower()
+
+        if not FAILURE_REASON_RE.fullmatch(reason):
+            raise HelperError(
+                "--reason must be a short lowercase issue code using letters, numbers, "
+                "underscores, or hyphens."
+            )
+
+        if cik not in state["individually_checked"]:
+            state["failed"][cik] = {"ticker": ticker, "reason": reason}
+
+    return cik
+
+
+def coverage_audit(state):
+    """Return a compact coverage audit and whether every expected filer was checked."""
+    enumeration = state["enumeration"]
+    scope = state["scope"]
+    inconsistencies = list(dict.fromkeys(state["identity_issues"]))
+    accession_count = len(state["accessions"])
+
+    if enumeration.get("result_level") != "accession":
+        _append_unique(inconsistencies, "invalid_result_level")
+
+    if enumeration.get("coverage_complete") is not True:
+        _append_unique(inconsistencies, "enumeration_incomplete")
+
+    if enumeration.get("issues"):
+        _append_unique(inconsistencies, "coverage_issues_present")
+
+    if enumeration.get("has_more") is not False:
+        _append_unique(inconsistencies, "enumeration_has_more")
+
+    if enumeration.get("count") != accession_count:
+        _append_unique(inconsistencies, "returned_count_mismatch")
+
+    if enumeration.get("total_count") != accession_count:
+        _append_unique(inconsistencies, "total_count_mismatch")
+
+    if enumeration.get("accession_count") != accession_count:
+        _append_unique(inconsistencies, "accession_count_mismatch")
+
+    if scope.get("days") not in (1, 2, 3):
+        _append_unique(inconsistencies, "unsupported_date_window")
+
+    unsearchable = sorted(
+        cik
+        for cik, filer in state["filers"].items()
+        if _qualified_ticker(filer.get("search_ticker")) is None
+    )
+    missing = _missing_ciks(state)
+    failed = sorted(state["failed"])
+    complete = not inconsistencies and not unsearchable and not missing and not failed
+    output = {
+        "complete": complete,
+        "as_of": enumeration.get("as_of"),
+        "selected_forms": scope.get("expected_forms") or [],
+        "date_from": scope.get("date_from"),
+        "date_to": scope.get("date_to"),
+        "accession_count": accession_count,
+        "filer_count": len(state["filers"]),
+        "broad_search_filer_count": len(set(state["broad_surfaced"])),
+        "individually_checked_filer_count": len(state["individually_checked"]),
+        "failed_filer_count": len(failed),
+        "unsearchable_filer_count": len(unsearchable),
+        "unpolled_filer_count": len(missing),
+        "coverage_issues": enumeration.get("issues") or [],
+        "inconsistencies": inconsistencies,
+    }
+    return output
+
+
 def _argument_parser():
     parser = argparse.ArgumentParser(
         description="Process DFin filing artifacts without emitting full results."
@@ -622,6 +1187,35 @@ def _argument_parser():
         type=int,
         default=DEFAULT_EVIDENCE_CHARS,
     )
+
+    coverage_init = subparsers.add_parser("coverage-init")
+    coverage_init.add_argument("--state", type=Path, required=True)
+    coverage_init.add_argument("--expected-form", action="append", required=True)
+    coverage_source = coverage_init.add_mutually_exclusive_group(required=True)
+    coverage_source.add_argument("--artifact", type=Path)
+    coverage_source.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Read one enumeration capability URL from stdin and download it.",
+    )
+
+    coverage_add_search = subparsers.add_parser("coverage-add-search")
+    coverage_add_search.add_argument("--state", type=Path, required=True)
+    coverage_add_search.add_argument("--artifact", type=Path, required=True)
+
+    coverage_missing = subparsers.add_parser("coverage-missing")
+    coverage_missing.add_argument("--state", type=Path, required=True)
+    coverage_missing.add_argument("--limit", type=int, default=MAX_COVERAGE_ROWS)
+    coverage_missing.add_argument("--offset", type=int, default=0)
+
+    coverage_mark = subparsers.add_parser("coverage-mark")
+    coverage_mark.add_argument("--state", type=Path, required=True)
+    coverage_mark.add_argument("--ticker", required=True)
+    coverage_mark.add_argument("--status", choices=("checked", "failed"), required=True)
+    coverage_mark.add_argument("--reason")
+
+    coverage_audit_parser = subparsers.add_parser("coverage-audit")
+    coverage_audit_parser.add_argument("--state", type=Path, required=True)
     return parser
 
 
@@ -631,6 +1225,8 @@ def main(argv=None):
 
     try:
         arguments = parser.parse_args(argv)
+
+        exit_code = 0
 
         if arguments.command == "summarize":
             artifact_path = arguments.artifact
@@ -664,7 +1260,7 @@ def main(argv=None):
                 "truncated": remaining > 0,
                 "shown": shown,
             }
-        else:
+        elif arguments.command == "select":
             results = load_artifact(arguments.artifact)
             output = {
                 "selected": select_bundles(
@@ -674,14 +1270,90 @@ def main(argv=None):
                 )
             }
 
+        elif arguments.command == "coverage-init":
+            expected_forms = _normalized_expected_forms(arguments.expected_form)
+
+            if arguments.fetch:
+                url = sys.stdin.read().strip()
+                body = fetch_artifact_bytes(url)
+
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise HelperError(
+                        "The downloaded enumeration artifact is not valid UTF-8 JSON."
+                    ) from exc
+            else:
+                payload = _load_json_value(arguments.artifact)
+
+            state = _enumeration_state(payload, expected_forms)
+            _write_state(arguments.state, state)
+            output = {
+                "enumeration_complete": state["enumeration"]["coverage_complete"],
+                "as_of": state["enumeration"]["as_of"],
+                "selected_forms": state["scope"]["expected_forms"],
+                "accession_count": len(state["accessions"]),
+                "filer_count": len(state["filers"]),
+                "missing_filer_count": len(_missing_ciks(state)),
+                "coverage_issues": state["enumeration"]["issues"],
+                "inconsistencies": state["identity_issues"],
+            }
+
+        elif arguments.command == "coverage-add-search":
+            state = _load_state(arguments.state)
+            results = load_artifact(arguments.artifact)
+            added_count = add_broad_search_results(state, results)
+            _write_state(arguments.state, state)
+            output = {
+                "added_filer_count": added_count,
+                "broad_search_filer_count": len(state["broad_surfaced"]),
+                "missing_filer_count": len(_missing_ciks(state)),
+                "unexpected_filer_count": len(state["unexpected"]),
+                "identity_issues": state["identity_issues"],
+            }
+
+        elif arguments.command == "coverage-missing":
+            state = _load_state(arguments.state)
+            output = missing_filers(
+                state,
+                offset=arguments.offset,
+                limit=arguments.limit,
+            )
+
+        elif arguments.command == "coverage-mark":
+            state = _load_state(arguments.state)
+            cik = mark_filer(
+                state,
+                arguments.ticker,
+                arguments.status,
+                arguments.reason,
+            )
+            _write_state(arguments.state, state)
+            output = {
+                "cik": cik,
+                "ticker": arguments.ticker,
+                "status": (
+                    "checked"
+                    if cik in state["individually_checked"]
+                    else "failed"
+                ),
+                "missing_filer_count": len(_missing_ciks(state)),
+                "failed_filer_count": len(state["failed"]),
+            }
+
+        else:
+            state = _load_state(arguments.state)
+            output = coverage_audit(state)
+            exit_code = 0 if output["complete"] else 3
+
         json.dump(output, sys.stdout, ensure_ascii=False, separators=(",", ":"))
         sys.stdout.write("\n")
-        return 0
+        return exit_code
     except HelperError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(
-            "Hint: keep the capability URL private, use summarize first, "
-            "then select only the bundles that need evidence.",
+            "Hint: keep capability URLs private and verify the requested artifact, "
+            "coverage state, and command arguments.",
             file=sys.stderr,
         )
         return 2

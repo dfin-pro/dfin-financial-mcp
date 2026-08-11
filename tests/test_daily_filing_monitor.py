@@ -89,6 +89,88 @@ def _filing_result(
     return result
 
 
+def _accession_row(
+    *,
+    cik="0000789019",
+    accession="0000789019-26-000001",
+    tickers=None,
+    filing_type="8-K",
+    filing_date="2026-08-06",
+    issuer_name="Microsoft Corporation",
+):
+    return {
+        "type": "filing_accession",
+        "accession_number": accession,
+        "cik": cik,
+        "issuer_name": issuer_name,
+        "tickers": ["MSFT.US"] if tickers is None else tickers,
+        "filing_type": filing_type,
+        "filing_date": filing_date,
+    }
+
+
+def _enumeration_payload(
+    results=None,
+    *,
+    filing_types=None,
+    days=2,
+    date_from="2026-08-05",
+    date_to="2026-08-06",
+    complete=True,
+    has_more=False,
+    count=None,
+    total_count=None,
+    accession_count=None,
+    issues=None,
+):
+    results = [_accession_row()] if results is None else results
+    filing_types = ["8-K"] if filing_types is None else filing_types
+    unique_accessions = {
+        row.get("accession_number")
+        for row in results
+        if isinstance(row, dict) and row.get("accession_number")
+    }
+    by_filing_type = {}
+
+    for row in results:
+        if isinstance(row, dict) and row.get("filing_type"):
+            by_filing_type[row["filing_type"]] = (
+                by_filing_type.get(row["filing_type"], 0) + 1
+            )
+
+    return {
+        "document_type": "filing",
+        "result_level": "accession",
+        "count": len(results) if count is None else count,
+        "total_count": (
+            len(unique_accessions) if total_count is None else total_count
+        ),
+        "has_more": has_more,
+        "coverage": {
+            "complete": complete,
+            "as_of": "2026-08-06T18:42:00Z",
+            "accession_count": (
+                len(unique_accessions)
+                if accession_count is None
+                else accession_count
+            ),
+            "by_filing_type": by_filing_type,
+            "issues": [] if issues is None else issues,
+        },
+        "filters": {
+            "ticker": None,
+            "filing_types": filing_types,
+            "limit": -1,
+            "days": days,
+            "data_in_db_only": False,
+            "result_level": "accession",
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+        "results": results,
+    }
+
+
 def _stock_payload():
     return {
         "ticker": "MSFT.US",
@@ -500,6 +582,326 @@ class FilingArtifactTests(unittest.TestCase):
 
         self.assertEqual(json.loads(body), {"results": []})
         self.assertEqual(sleeps, [1.0])
+
+    def test_coverage_state_reconciles_broad_and_individual_filers(self):
+        results = [
+            _accession_row(
+                tickers=["MSFT.US", "MSFT.A.US"],
+                filing_type="8-K",
+            ),
+            _accession_row(
+                accession="0000789019-26-000002",
+                tickers=["MSFT.US"],
+                filing_type="6-K",
+            ),
+            _accession_row(
+                cik="0000320193",
+                accession="0000320193-26-000001",
+                tickers=["AAPL.US"],
+                filing_type="8-K",
+                issuer_name="Apple Inc.",
+            ),
+        ]
+        state = FILING._enumeration_state(
+            _enumeration_payload(results, filing_types=["8-K", "6-K"]),
+            ["8-K", "6-K"],
+        )
+
+        self.assertEqual(state["filers"]["0000789019"]["search_ticker"], "MSFT.US")
+        self.assertEqual(
+            state["filers"]["0000789019"]["tickers"],
+            ["MSFT.US", "MSFT.A.US"],
+        )
+        self.assertEqual(len(state["accessions"]), 3)
+
+        added = FILING.add_broad_search_results(state, [_filing_result()])
+        missing = FILING.missing_filers(state)
+
+        self.assertEqual(added, 1)
+        self.assertEqual([row["ticker"] for row in missing["missing"]], ["AAPL.US"])
+        self.assertFalse(FILING.coverage_audit(state)["complete"])
+
+        FILING.mark_filer(state, "AAPL.US", "failed", "rate_limited")
+        self.assertEqual(FILING.coverage_audit(state)["failed_filer_count"], 1)
+
+        FILING.mark_filer(state, "AAPL.US", "checked")
+        audit = FILING.coverage_audit(state)
+
+        self.assertTrue(audit["complete"])
+        self.assertEqual(audit["accession_count"], 3)
+        self.assertEqual(audit["filer_count"], 2)
+        self.assertEqual(audit["broad_search_filer_count"], 1)
+        self.assertEqual(audit["individually_checked_filer_count"], 1)
+        self.assertEqual(audit["failed_filer_count"], 0)
+
+    def test_broad_search_uses_ticker_fallback_and_rejects_identity_conflict(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload(
+                [
+                    _accession_row(),
+                    _accession_row(
+                        cik="0000320193",
+                        accession="0000320193-26-000001",
+                        tickers=["AAPL.US"],
+                        issuer_name="Apple Inc.",
+                    ),
+                ]
+            ),
+            ["8-K"],
+        )
+        ticker_only = _filing_result(ticker="AAPL.US", cik="", accession="")
+        ticker_only["meta_data"]["source_uri"] = ""
+
+        self.assertEqual(FILING.add_broad_search_results(state, [ticker_only]), 1)
+        self.assertIn("0000320193", state["broad_surfaced"])
+
+        conflict = _filing_result(ticker="AAPL.US")
+        self.assertEqual(FILING.add_broad_search_results(state, [conflict]), 0)
+        self.assertIn("search_identity_conflict", state["identity_issues"])
+        self.assertFalse(FILING.coverage_audit(state)["complete"])
+
+    def test_empty_inline_enumeration_initializes_and_audits_complete(self):
+        payload = _enumeration_payload([], count=0, total_count=0, accession_count=0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "empty.json"
+            state_path = Path(directory) / "coverage.json"
+            artifact.write_text(json.dumps({"text": json.dumps(payload)}), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with mock.patch("sys.stdout", stdout):
+                result = FILING.main(
+                    [
+                        "coverage-init",
+                        "--state",
+                        str(state_path),
+                        "--expected-form",
+                        "8-k",
+                        "--artifact",
+                        str(artifact),
+                    ]
+                )
+
+            init_output = json.loads(stdout.getvalue())
+            saved_state = state_path.read_text(encoding="utf-8")
+            audit_stdout = io.StringIO()
+
+            with mock.patch("sys.stdout", audit_stdout):
+                audit_result = FILING.main(
+                    ["coverage-audit", "--state", str(state_path)]
+                )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(init_output["filer_count"], 0)
+        self.assertEqual(init_output["accession_count"], 0)
+        self.assertNotIn("https://", saved_state)
+        self.assertEqual(audit_result, 0)
+        self.assertTrue(json.loads(audit_stdout.getvalue())["complete"])
+
+    def test_coverage_rejects_windows_over_three_days(self):
+        valid_windows = (
+            (1, "2026-08-06", "2026-08-06"),
+            (2, "2026-08-05", "2026-08-06"),
+            (3, "2026-08-04", "2026-08-06"),
+        )
+
+        for days, date_from, date_to in valid_windows:
+            with self.subTest(days=days):
+                state = FILING._enumeration_state(
+                    _enumeration_payload(
+                        days=days,
+                        date_from=date_from,
+                        date_to=date_to,
+                    ),
+                    ["8-K"],
+                )
+                self.assertEqual(state["scope"]["days"], days)
+
+        payload = _enumeration_payload(
+            days=4,
+            date_from="2026-08-05",
+            date_to="2026-08-08",
+        )
+
+        with self.assertRaisesRegex(FILING.HelperError, "one to three calendar days"):
+            FILING._enumeration_state(payload, ["8-K"])
+
+    def test_coverage_audit_reports_incomplete_and_mismatched_enumeration(self):
+        duplicate = _accession_row()
+        payload = _enumeration_payload(
+            [duplicate, dict(duplicate)],
+            complete=False,
+            has_more=True,
+            total_count=1,
+            accession_count=1,
+            issues=["source_changed_during_scan"],
+        )
+        state = FILING._enumeration_state(payload, ["8-K"])
+        FILING.mark_filer(state, "MSFT.US", "checked")
+        audit = FILING.coverage_audit(state)
+
+        self.assertFalse(audit["complete"])
+        self.assertEqual(audit["coverage_issues"], ["source_changed_during_scan"])
+        self.assertIn("enumeration_incomplete", audit["inconsistencies"])
+        self.assertIn("enumeration_has_more", audit["inconsistencies"])
+        self.assertIn("returned_count_mismatch", audit["inconsistencies"])
+
+    def test_coverage_missing_is_bounded_and_pageable(self):
+        rows = [
+            _accession_row(
+                cik=str(index).zfill(10),
+                accession=f"{index:010d}-26-{index:06d}",
+                tickers=[f"T{index}.US"],
+                issuer_name=f"Issuer {index}",
+            )
+            for index in range(1, 56)
+        ]
+        state = FILING._enumeration_state(_enumeration_payload(rows), ["8-K"])
+
+        first = FILING.missing_filers(state, limit=999)
+        second = FILING.missing_filers(state, offset=50)
+
+        self.assertEqual(first["shown_count"], 50)
+        self.assertEqual(first["remaining_count"], 5)
+        self.assertEqual(second["shown_count"], 5)
+        self.assertEqual(second["remaining_count"], 0)
+
+    def test_coverage_mark_requires_stable_reason_and_known_ticker(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+
+        with self.assertRaisesRegex(FILING.HelperError, "short lowercase issue code"):
+            FILING.mark_filer(
+                state,
+                "MSFT.US",
+                "failed",
+                "https://www.dfin.pro/api/v1/artifacts/Secret",
+            )
+
+        with self.assertRaisesRegex(FILING.HelperError, "exactly one enumerated filer"):
+            FILING.mark_filer(state, "AAPL.US", "checked")
+
+    def test_coverage_audit_rejects_unsearchable_and_ambiguous_filers(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload(
+                [_accession_row(tickers=[])],
+            ),
+            ["8-K"],
+        )
+        audit = FILING.coverage_audit(state)
+
+        self.assertFalse(audit["complete"])
+        self.assertEqual(audit["unsearchable_filer_count"], 1)
+
+        self.assertEqual(
+            FILING.add_broad_search_results(state, [_filing_result(ticker="MSFT.US")]),
+            1,
+        )
+        self.assertEqual(state["filers"]["0000789019"]["search_ticker"], "MSFT.US")
+        self.assertTrue(FILING.coverage_audit(state)["complete"])
+
+        ambiguous_state = FILING._enumeration_state(
+            _enumeration_payload(
+                [
+                    _accession_row(tickers=["SAME.US"]),
+                    _accession_row(
+                        cik="0000320193",
+                        accession="0000320193-26-000001",
+                        tickers=["SAME.US"],
+                        issuer_name="Apple Inc.",
+                    ),
+                ]
+            ),
+            ["8-K"],
+        )
+
+        self.assertIn("ambiguous_ticker_alias", ambiguous_state["identity_issues"])
+        self.assertFalse(FILING.coverage_audit(ambiguous_state)["complete"])
+
+    def test_coverage_state_never_persists_capability_urls(self):
+        row = _accession_row()
+        row["filing_url"] = "https://www.sec.gov/Archives/example.htm"
+        state = FILING._enumeration_state(_enumeration_payload([row]), ["8-K"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "coverage.json"
+            FILING._write_state(state_path, state)
+            saved = state_path.read_text(encoding="utf-8")
+            self.assertNotIn("https://", saved)
+
+            state["unexpected"].append(
+                {"note": "https://www.dfin.pro/api/v1/artifacts/Secret"}
+            )
+
+            with self.assertRaisesRegex(FILING.HelperError, "Capability URLs"):
+                FILING._write_state(state_path, state)
+
+    def test_coverage_cli_reconciles_search_marks_and_audits(self):
+        enumeration = _enumeration_payload(
+            [
+                _accession_row(),
+                _accession_row(
+                    cik="0000320193",
+                    accession="0000320193-26-000001",
+                    tickers=["AAPL.US"],
+                    issuer_name="Apple Inc.",
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            enumeration_path = directory / "enumeration.json"
+            search_path = directory / "search.json"
+            state_path = directory / "coverage.json"
+            enumeration_path.write_text(json.dumps(enumeration), encoding="utf-8")
+            search_path.write_text(
+                json.dumps({"results": [_filing_result()]}),
+                encoding="utf-8",
+            )
+
+            commands = [
+                [
+                    "coverage-init",
+                    "--state",
+                    str(state_path),
+                    "--expected-form",
+                    "8-K",
+                    "--artifact",
+                    str(enumeration_path),
+                ],
+                [
+                    "coverage-add-search",
+                    "--state",
+                    str(state_path),
+                    "--artifact",
+                    str(search_path),
+                ],
+                [
+                    "coverage-mark",
+                    "--state",
+                    str(state_path),
+                    "--ticker",
+                    "AAPL.US",
+                    "--status",
+                    "checked",
+                ],
+                ["coverage-audit", "--state", str(state_path)],
+            ]
+            outputs = []
+
+            for command in commands:
+                stdout = io.StringIO()
+
+                with mock.patch("sys.stdout", stdout):
+                    result = FILING.main(command)
+
+                self.assertEqual(result, 0)
+                outputs.append(json.loads(stdout.getvalue()))
+
+        self.assertEqual(outputs[1]["broad_search_filer_count"], 1)
+        self.assertEqual(outputs[1]["missing_filer_count"], 1)
+        self.assertEqual(outputs[2]["missing_filer_count"], 0)
+        self.assertTrue(outputs[3]["complete"])
 
 
 class DashboardBuilderTests(unittest.TestCase):
@@ -1344,8 +1746,25 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("ask for one monitoring theme and make no DFin calls", skill)
         self.assertIn("ratio ticker mismatch aborts the build", skill)
         self.assertIn("--offset", skill)
-        self.assertNotIn("list_latest_filings", skill)
+        self.assertIn("list_latest_filings", skill)
+        self.assertIn("result_level: accession", skill)
+        self.assertIn("limit: -1", skill)
+        self.assertIn("coverage-init", skill)
+        self.assertIn("coverage-add-search", skill)
+        self.assertIn("coverage-missing", skill)
+        self.assertIn("coverage-mark", skill)
+        self.assertIn("coverage-audit", skill)
+        self.assertIn("inclusive windows of one to three calendar days", skill)
+        self.assertIn("plausible SEC disclosure paths", skill)
+        self.assertIn("expand the form set, rerun enumeration", skill)
+        self.assertIn("**Omit `filing_type`**", skill)
+        self.assertIn("methodology_delegation", skill)
+        self.assertIn("Do not create one worker per ticker", skill)
+        self.assertIn("successful zero-result response also counts as checked", skill)
+        self.assertIn("does not prove perfect thematic recall", skill)
         self.assertNotIn("what happened in filings today", skill)
+        self.assertNotIn("what companies announced [topic] this week?", skill)
+        self.assertNotIn("Use seven days", skill)
         self.assertNotIn("results_per_query: 20", skill)
         self.assertNotIn('ticker: "<TICKER>.US"', skill)
         self.assertIn('type="application/json"', dashboard)
