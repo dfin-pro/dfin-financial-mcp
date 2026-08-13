@@ -14,7 +14,8 @@ Monitor US-listed SEC filers, including foreign private issuers and ADRs. Keep e
 ## Non-negotiable context boundary
 
 - Keep filing and document searches on API delivery and pass their artifact URLs directly to local helpers. A valid empty `list_latest_filings` API response may be saved unchanged as the census. Handle a valid empty `search_filings` response immediately with the helper's scope-bound `--empty` attestation; do not turn it into a reusable result artifact. If a harness security policy blocks another artifact URL, follow the `methodology_search` allowlist, retry, warning, and inline sequence exactly; inline is not a fallback for any other failure.
-- Request stock context once for all resolved tickers with the delivery mode selected below. Pass its artifact URL or complete inline batch directly to the dashboard helper.
+- Call `list_latest_filings` exactly once per scan. Its saved accession population is the immutable working census for current and historical dates alike; never refresh, replace, or expand it while that scan is running.
+- Request stock context in stable batches of at most 10 resolved tickers with the delivery mode selected below. Pass the artifact URLs or complete inline batches directly to the dashboard helper.
 - Treat every capability URL as sensitive. Never quote, log, persist, or share it.
 - Download artifacts only into local helpers. Except for a methodology-approved inline fallback, never print, read, or return a complete artifact or chunk to model context.
 - When inline fallback is required, write the direct response unchanged to temporary JSON without quoting or analyzing it. Use only the helper's bounded summaries and selected evidence for classification.
@@ -35,13 +36,13 @@ Choose forms:
 - Before discovery, identify the plausible SEC disclosure paths for the topic and select a defensible form universe. Current reports such as `8-K` and `6-K` are a starting point, not a universal answer; prospectus, registration, annual, quarterly, and foreign-issuer forms may also carry the event.
 - Treat examples as guidance, not an exhaustive or mandatory mapping. For example, a capital-raising scan should consider whether offering, prospectus, or registration filings are needed in addition to current reports.
 - Pass the complete selected form list to `list_latest_filings`. Call `search_filings` separately per form because its `filing_type` is scalar.
-- If later evidence surfaces a relevant form outside the selected universe, expand the form set, rerun enumeration, and recompute coverage before presenting.
+- Finalize the form universe before enumeration. If later evidence suggests a broadly missing form, finish the frozen scan with a scope note; start a new scan only when expanded universe-wide coverage is requested. A companion form for a company already in the census may still surface through its ticker-scoped reconciliation search and is handled below.
 
 Use dashboard mode by default. Use text mode when the user says “no dashboard,” “just list them,” “just text,” or equivalent.
 
 ## 2. Enumerate, search, and reconcile
 
-Create a temporary coverage-state path outside the repository. Enumerate the complete point-in-time accession population before thematic search:
+Create new temporary census and coverage-state paths outside the repository. Enumerate the complete point-in-time accession population once before thematic search:
 
 ```yaml
 filing_types: <agent-selected form-prefix array>
@@ -52,13 +53,13 @@ data_in_db_only: false
 delivery: api
 ```
 
-For a non-empty response, pass `results_url` on stdin without exposing it, save the immutable census outside the repository, and initialize the ledger with every selected form repeated as `--expected-form`:
+For a non-empty response, pass `results_url` on stdin without exposing it, save the immutable census outside the repository, and initialize the new ledger with every selected form repeated as `--expected-form`:
 
 ```text
 python3 <skill-dir>/scripts/filing_artifact.py coverage-init --state <coverage-state-path> --expected-form <form> [--expected-form <form> ...] --save <census-json-path> --fetch
 ```
 
-For a valid empty inline response, write the complete response unchanged to `<census-json-path>` and use `--artifact <census-json-path>` instead of `--save ... --fetch`. The helper verifies accession-level delivery, the one-to-three-day window, `limit: -1`, the selected form universe, counts, and coverage metadata without printing the population. Use the returned `date_from` and `date_to` for every search rather than inferring them from `days`. Preserve every reported issue. A structurally valid census with `coverage.complete=false` still produces a ledger for an explicitly incomplete best-effort scan. If enumeration, download, JSON decoding, or census saving fails before a ledger exists, run only the form-specific broad searches and classification steps; skip reconciliation and `coverage-audit`, state that no census was available, and never present a no-match or comprehensive conclusion. Do not invent pagination or widen the window.
+For a valid empty inline response, write the complete response unchanged to `<census-json-path>` and use `--artifact <census-json-path>` instead of `--save ... --fetch`. The coverage-state file must not already exist: the helper refuses to overwrite it. The helper verifies accession-level delivery, the one-to-three-day window, `limit: -1`, the selected form universe, counts, and coverage metadata, and records a stable census fingerprint without printing the population. Use the returned `date_from` and `date_to` for every search rather than inferring them from `days`. Preserve every reported issue. A structurally valid census with `coverage.complete=false` still produces a ledger for an explicitly incomplete best-effort scan. If enumeration, download, JSON decoding, or census saving fails before a ledger exists, run only the form-specific broad searches and classification steps; skip reconciliation and `coverage-audit`, state that no census was available, and never present a no-match or comprehensive conclusion. Do not call `list_latest_filings` again, invent pagination, or widen the window.
 
 Create 3–5 short, source-native queries covering plain language, legal terminology, the applicable SEC item, and only the most relevant process or financial terms. Examples:
 
@@ -80,18 +81,18 @@ include_content_tail: true
 content_preview_chars: 150
 ```
 
-Finalize the thematic query set before recording the first search receipt. Expand only a deficient query and never above 10 results without stating why. If a query changes after any receipt was recorded, rerun `coverage-init` with `--artifact <census-json-path>` and the same expected forms, then rerun every broad and ticker search with the revised set. Do not call `list_latest_filings` again for that reset. On an external SEC timeout, wait 30 seconds and retry once unchanged. If the retry fails, preserve the original date, form, ticker, and query scope, record `timeout`, and report temporary unavailability; narrowing the coverage scope cannot satisfy reconciliation.
-
-Pass each returned `results_url` on stdin to the filing helper; never place it in prose. Use a distinct temporary path for every broad or ticker-scoped search so later classification cannot overwrite an earlier candidate artifact:
+Finalize the thematic query set before recording the first search receipt. Expand only a deficient query and never above 10 results without stating why. If a query changes after any receipt was recorded, reset only the local search-derived ledger, then rerun every broad and ticker search with the revised set:
 
 ```text
-python3 <skill-dir>/scripts/filing_artifact.py summarize --fetch --save <temporary-json-path>
+python3 <skill-dir>/scripts/filing_artifact.py coverage-reset-searches --state <coverage-state-path>
 ```
 
-After saving each broad-search artifact, add its validated form receipt and filer identities to the ledger. Repeat the exact same normalized query set as `--query` values for every receipt:
+This preserves the census population, scope, `coverage.as_of`, upstream issues, and fingerprint. Never re-run `coverage-init` or `list_latest_filings` within the scan. On an external SEC timeout, wait 30 seconds and retry once unchanged. If the retry fails, preserve the original date, form, ticker, and query scope, record `timeout`, and report temporary unavailability; narrowing the coverage scope cannot satisfy reconciliation.
+
+Pass each returned `results_url` on stdin to the filing helper; never place it in prose. Fetch, save, validate, record coverage, filter out new companies, and emit bounded eligible summaries in one operation. The helper leaves the downloaded response byte-for-byte unchanged and writes a compact `<temporary-json-path>.summary-index.json` sidecar containing only census-bound, model-safe bundle metadata. Use a distinct temporary path for every broad or ticker-scoped search so later classification cannot overwrite an earlier candidate artifact:
 
 ```text
-python3 <skill-dir>/scripts/filing_artifact.py coverage-add-search --state <coverage-state-path> --expected-form <form> --artifact <temporary-json-path> --query "<query 1>" [--query "<query 2>" ...]
+python3 <skill-dir>/scripts/filing_artifact.py coverage-add-search --state <coverage-state-path> --expected-form <form> --fetch --save <temporary-json-path> --query "<query 1>" [--query "<query 2>" ...]
 ```
 
 If the form-specific search still fails after its prescribed retry, record the form-level failure without fabricating a successful receipt:
@@ -100,15 +101,15 @@ If the form-specific search still fails after its prescribed retry, record the f
 python3 <skill-dir>/scripts/filing_artifact.py coverage-add-search --state <coverage-state-path> --expected-form <form> --failed --reason <timeout|rate_limited|malformed_response|artifact_unavailable> --query "<query 1>" [--query "<query 2>" ...]
 ```
 
-For a successful empty broad search, replace `--artifact <temporary-json-path>` with `--empty`; do not create a fake result artifact. This is an explicit agent attestation that the just-completed scoped tool call returned `{"count": 0}`. For non-empty results, use one immutable saved path per call. The helper rejects byte-identical response payloads and reuse of a canonical artifact path.
+For a successful empty broad search, use the same command with `--empty` instead of `--fetch --save <temporary-json-path>`; do not create a fake result artifact. This is an explicit agent attestation that the just-completed scoped tool call returned `{"count": 0}`. For non-empty results, use one immutable saved path per call. The helper rejects byte-identical response payloads and reuse of a canonical artifact path.
 
-The helper prints no more than 15 accession-level bundle summaries with previews of at most 220 characters, one validated SEC source link per bundle, and explicit remaining-count metadata. Keep the temporary artifact outside the repository and delete it after the scan. If `truncated` is true, continue with `--offset <offset + shown_count>` until every returned bundle summary has been reviewed; the coverage ledger prevents omitted filers, while summary paging prevents returned candidates from being silently ignored.
-
-If the methodology-approved security-policy fallback required `delivery: inline`, write the entire direct response unchanged to `<temporary-json-path>`, then run:
+The helper prints no more than 15 eligible accession-level bundle summaries with previews of at most 220 characters, one validated SEC source link per bundle, and explicit remaining-count metadata. New-company results never enter these summaries. Keep the temporary artifact and its summary-index sidecar outside the repository and delete both after the scan. If `truncated` is true, page with the same command below until every eligible returned bundle has been reviewed. The helper automatically reads the compact sidecar, so later pages do not reopen, refilter, or regroup the complete search response; if the sidecar is absent or invalid, it safely falls back to the raw artifact:
 
 ```text
-python3 <skill-dir>/scripts/filing_artifact.py summarize --artifact <temporary-json-path>
+python3 <skill-dir>/scripts/filing_artifact.py summarize --state <coverage-state-path> --artifact <temporary-json-path> --offset <offset + shown_count>
 ```
+
+If the methodology-approved security-policy fallback required `delivery: inline`, write the entire direct response unchanged to `<temporary-json-path>`, then use `coverage-add-search --artifact <temporary-json-path>` with the same state, form, and query arguments. Do not run an unfiltered summary first.
 
 Do not invent or rewrite an artifact URL. Both delivery branches preserve one temporary file per search for later bundle selection; resume with the identity rules.
 
@@ -136,13 +137,15 @@ include_content_tail: true
 content_preview_chars: 150
 ```
 
-Process and save a usable non-empty result through `summarize`. Then mark the filer checked by consuming that saved response and repeating the exact query set. The helper rejects wrong-ticker or out-of-window non-empty results:
+For a usable non-empty result, fetch, save, validate, mark the census filer checked, record companion accessions, exclude new companies, and emit only eligible summaries in one operation. Repeat the exact query set:
 
 ```text
-python3 <skill-dir>/scripts/filing_artifact.py coverage-mark --state <coverage-state-path> --ticker <ticker> --status checked --artifact <ticker-search-json-path> --query "<query 1>" [--query "<query 2>" ...]
+python3 <skill-dir>/scripts/filing_artifact.py coverage-mark --state <coverage-state-path> --ticker <ticker> --status checked --fetch --save <ticker-search-json-path> --query "<query 1>" [--query "<query 2>" ...]
 ```
 
-For a successful zero-result response, use the same command with `--empty` instead of `--artifact <ticker-search-json-path>`. This explicitly attests the just-completed ticker/date/query call; never substitute an old or copied response.
+For the methodology-approved inline fallback, write the response unchanged and replace `--fetch --save <ticker-search-json-path>` with `--artifact <ticker-search-json-path>`. The helper rejects wrong-ticker, conflicting-identity, or out-of-window results before recording the check.
+
+For a successful zero-result response, use the same command with `--empty` instead of `--fetch --save <ticker-search-json-path>`. This explicitly attests the just-completed ticker/date/query call; never substitute an old or copied response.
 
 For a timeout, `429`, malformed response, failed artifact retrieval, or unresolved result, follow the applicable retry guidance and record the unresolved attempt rather than treating it as no match:
 
@@ -172,7 +175,7 @@ Run the audit after all follow-ups and before enrichment:
 python3 <skill-dir>/scripts/filing_artifact.py coverage-audit --state <coverage-state-path>
 ```
 
-A nonzero audit means the scan is not comprehensive. A failed broad-form search, an unexpected in-window filer, or an authoritative SEC accession absent from the census also blocks completion; resolve the failure or identity, or rerun enumeration before continuing. A tickerless filer already matched by SEC-source CIK in a broad result is checked and may remain under its CIK, but a tickerless pending filer must be resolved or failed. Never turn a failed, unsearchable, unexpected, or unpolled filer into a no-match conclusion. Delete the coverage state, saved census, and all temporary filing artifacts after the final result.
+An audit with `complete: false` exits nonzero and means the frozen-census scan is not comprehensive. A failed broad-form search, conflicting or unverified identity, or unresolved census filer blocks completion. A tickerless filer already matched by SEC-source CIK in a broad result is checked and may remain under its CIK, but a tickerless pending filer must be resolved or failed. A validated new accession for an existing census CIK is an included companion and may be classified and rendered without changing the census. A validated accession for a CIK outside the census is excluded, never reconciled or enriched, and does not block completion; report only its aggregate count using the audit's `post_start_exclusion_note`. Never turn a failed, unsearchable, conflicting, or unpolled census filer into a no-match conclusion. Delete the coverage state, saved census, and all temporary filing artifacts after the final result.
 
 ### Identity rules
 
@@ -184,6 +187,7 @@ A nonzero audit means the scan is not comprehensive. A failed broad-form search,
 - Outside the coverage ledger, use CIK only as a secondary collision key. Never replace a valid presentation ticker with CIK.
 - Use CIK plus SEC accession as the bundle identity; fall back to `doc_uuid` when no accession is available.
 - Normalize `8-K 10.2` into bundle form `8-K` and document designation `10.2`.
+- Keep the original accession map immutable. Deduplicate included companions and excluded new-company filings by authoritative SEC accession; neither class may enter `coverage-missing`.
 
 ### Classify bundles
 
@@ -209,7 +213,7 @@ For a user-requested company deep dive, search selected bundle documents with fo
 
 ### Text mode
 
-Call `get_stock_context` once with all resolved `tickers`, `fields: ["price", "returns"]`, and `delivery: inline`. Skip ratios and descriptions. Put the entire response object in the manifest as `stock_context`, unedited and including `format`, `count`, `success_count`, `error_count`, and `results`, then feed it to:
+Partition resolved tickers in stable order into batches of at most 10. Call `get_stock_context` once per batch with `fields: ["price", "returns"]` and `delivery: inline`; batches may run in parallel. Skip ratios and descriptions. Put every complete response object in the manifest's `stock_context_batches` array, unedited and including `format`, `count`, `success_count`, `error_count`, and `results`, then feed it to:
 
 ```text
 python3 <skill-dir>/scripts/build_dashboard.py --text --stock-cache <temporary-cache-path>
@@ -222,19 +226,19 @@ Present only the returned rows in the table described below. Delete the cache af
 Read `methodology_financials`. Then:
 
 1. For every resolved included company, call `get_financial_ratios` for the current year with `period: "FY"` and fields `returnOnEquity`, `returnOnInvestedCapital`, `netDebtToEBITDA`, and `ebitdaMargin`. On unavailable data, try the prior year and then one year earlier; stop at the first valid response.
-2. Call `get_stock_context` once with all resolved `tickers` and `delivery: api`. Omit `fields`; API delivery returns the complete shared artifact and rejects a supplied field selector.
-3. Put the compact ratio responses and the shared capability URL in the dashboard manifest as `stock_context_url`. Do not inspect the artifact payload outside the helper. Never retype, truncate, paraphrase, or hand-summarize a `data` field inside `results`; the builder parses the tool's exact response shape.
+2. Partition resolved tickers in stable order into batches of at most 10. Call `get_stock_context` once per batch with `delivery: api`; batches may run in parallel. Omit `fields` because API delivery returns complete artifacts and rejects a supplied field selector.
+3. Put each compact ratio response in its company's `ratios` field and put every stock-context capability URL in the manifest's `stock_context_urls` array. Do not inspect artifact payloads outside the helper. Never retype, truncate, paraphrase, or hand-summarize a `data` field inside `results`; the builder fetches and merges the exact response shapes locally.
 
 The builder extracts only top-level company name, ticker, description, structured price/returns/technicals, date-keyed earnings history, and allowlisted profile fields. It discards database, user-note, executive, estimate, and other unused sections.
 
-The builder selects each company from the shared artifact by ticker, verifies fresh and cached stock identity, and verifies the ticker in every compact ratio response before duplicate records are merged. For duplicate ratio responses, it uses the valid response with the newest integer fiscal year, preserving input order as the tie-breaker. Every uncached resolved ticker must have either a data result or an explicit error result. A missing ticker, malformed batch or ticker payload, conflicting manifest identity, two resolved tickers sharing one non-empty CIK, stock ticker or supplied secondary CIK mismatch, or ratio ticker mismatch aborts the build instead of creating a silently incomplete dashboard. A truly omitted stock CIK remains valid sparse data, but a supplied malformed CIK aborts. An invalid cache entry is discarded and refetched when a fresh source is available; without a fresh source it aborts. Legitimate sparse inline results, unresolved issuers, explicit availability errors, and refresh-required responses remain graceful: unavailable values stay `—`, unresolved issuers are never fetched, and filing cards remain present. Duplicate company records merge by qualified ticker, while unresolved issuers merge only by CIK or bundle identity; every filing requires a bundle ID, duplicate accession IDs merge, and conflicting or malformed filing bundles are omitted with `manifest_conflict`.
+The builder merges the batches locally and selects each company by ticker. It rejects a batch above 10 results, repeated or unrequested ticker results, and successful batches that omit an uncached ticker. It verifies fresh and cached stock identity and the ticker in every compact ratio response before duplicate company records are merged. For duplicate ratio responses, it uses the valid response with the newest integer fiscal year, preserving input order as the tie-breaker. Every uncached resolved ticker must have either a data result or an explicit error result. A malformed batch or ticker payload, conflicting manifest identity, two resolved tickers sharing one non-empty CIK, stock ticker or supplied secondary CIK mismatch, or ratio ticker mismatch aborts the build instead of creating a silently incomplete dashboard. A truly omitted stock CIK remains valid sparse data, but a supplied malformed CIK aborts. An invalid cache entry is discarded and refetched when a fresh source is available; without a fresh source it aborts. Legitimate sparse inline results, unresolved issuers, explicit availability errors, and refresh-required responses remain graceful: unavailable values stay `—`, unresolved issuers are never fetched, and filing cards remain present. Duplicate company records merge by qualified ticker, while unresolved issuers merge only by CIK or bundle identity; every filing requires a bundle ID, duplicate accession IDs merge, and conflicting or malformed filing bundles are omitted with `manifest_conflict`.
 
 The builder applies these rules:
 
-- Keep returns in five fixed positions: Daily, WTD, MTD, YTD, and 1Y. Use `null` for missing values; missing is never zero.
+- Keep returns in five fixed positions: Daily, WTD, MTD, YTD, and 1Y. Use `null` for missing values; missing is never zero. Daily is shown only in the price change line; the return tiles display WTD, MTD, YTD, and 1Y.
 - Sort earnings-history ISO date keys, select the latest four, and display them oldest-first. Actual above estimate is a beat; below is a miss; equal or missing is neutral.
 - Multiply ROE, ROIC, and EBITDA margin decimal fractions by 100 exactly once. Leave ND/EBITDA as a multiple.
-- Label ratios `FY<year>` plus the reported fiscal-year-end label when available. Do not infer an unavailable end date.
+- Label ratios with the source vintage as `FY<year>`; do not add the fiscal-year-end month. Omit the volume block when current volume is unavailable or nonpositive instead of displaying a misleading zero and `0.00×` average volume.
 - Preserve the complete description in the collapsible About panel without copying it into the narrative response.
 
 ## 4. Build and render
@@ -247,7 +251,7 @@ Create a compact manifest and feed it to `build_dashboard.py` on stdin. Do not i
   "ftype": "8-K / 6-K",
   "range": "Aug 5–6, 2026",
   "filters": [["appointments", "Appointments"]],
-  "stock_context_url": "<single-use batch capability>",
+  "stock_context_urls": ["<single-use batch capability>", "<next batch capability>"],
   "companies": [{
     "ticker": "MSFT.US",
     "name": "Microsoft Corporation",
@@ -269,7 +273,7 @@ Create a compact manifest and feed it to `build_dashboard.py` on stdin. Do not i
 }
 ```
 
-For an inline MCP response, replace `stock_context_url` with `"stock_context": {<complete ticker-keyed batch>}`. Copy the entire response object unchanged; never extract only `results` or rewrite any nested `data` string. Never provide both keys.
+For inline MCP responses, replace `stock_context_urls` with `"stock_context_batches": [{<complete ticker-keyed batch>}, ...]`. Copy every response object unchanged; never extract only `results` or rewrite any nested `data` string. Never provide both keys. The builder retains backward compatibility with singular `stock_context_url` and `stock_context`, but the skill uses the batched keys consistently.
 
 Run:
 
@@ -277,7 +281,7 @@ Run:
 python3 <skill-dir>/scripts/build_dashboard.py --template <skill-dir>/dashboard.html --output <cwd>/filing-monitor-<topic>-<date>.html --stock-cache <temporary-cache-path>
 ```
 
-The builder prints only the saved path, counts, and per-ticker status. If the shared artifact reports `refresh_required`, request one fresh batch for tickers not already in the temporary cache and rerun with the same cache. Delete the cache after the final build.
+The builder prints only the saved path, counts, and per-ticker status. If any artifact reports `refresh_required`, it still caches successful batches; request fresh batches only for tickers not already in the temporary cache and rerun with the same cache. Delete the cache after the final build.
 
 Rendering contract:
 
@@ -293,10 +297,10 @@ The dashboard validates SEC HTTPS links, allowlists visual classes/colors, uses 
 
 Read `output_guidelines` before presenting substantive results.
 
-- **Dashboard:** state the selected form universe, completed broad-form searches, accession and filer counts, broadly surfaced and individually checked filer counts, failures, unexpected filers or accessions, `coverage.as_of`, coverage issues or audit warnings, and the single most significant event; keep it to 1–2 compact lines, render the widget, and link the saved file when applicable.
+- **Dashboard:** state the selected form universe, frozen-census accession and filer counts, completed broad-form searches, broadly surfaced and individually checked census-filer counts, failures, included companion count, `coverage.as_of`, coverage issues or audit warnings, and the single most significant event; keep it to 1–2 compact lines, render the widget, and link the saved file when applicable. If the audit's excluded post-start count is nonzero, add its exact `post_start_exclusion_note` and no per-company detail for those exclusions.
 - **Text:** give the same compact coverage statement, then show one row per filing bundle with `Ticker | Company | Event | Price (Δ) | 1Y | Filing`. Mark doubtful bundles `⚑ flagged`. Do not include descriptions, ratios, or EPS history.
 - **No matches:** only when the audit is complete, say no relevant results were found within the selected form universe and suggest broader queries or a different topic-appropriate form universe. When the audit is incomplete, say no matches were found in an incomplete scan and name the unresolved coverage issue.
 
-Phrase completeness narrowly: every enumerated filer within the selected form universe has a recorded broad or ticker-scoped check against available searchable filings as of `coverage.as_of`. This does not prove perfect thematic recall or complete exhibit coverage. The audit reports `request_binding: agent_attested` because `search_filings` responses do not independently authenticate the query that produced them; the coordinating agent must preserve the exact tool-call-to-receipt association for both empty and non-empty responses.
+Phrase completeness narrowly: every filer in the one frozen census within the selected form universe has a recorded broad or ticker-scoped check against available searchable filings. `coverage.as_of` identifies when that census was assembled; later new-company filings are outside it and explicitly excluded. This does not prove perfect thematic recall or complete exhibit coverage. The audit reports `request_binding: agent_attested` because `search_filings` responses do not independently authenticate the query that produced them; the coordinating agent must preserve the exact tool-call-to-receipt association for both empty and non-empty responses.
 
 Never reproduce filing chunks, complete descriptions, artifact URLs, or dashboard details already shown elsewhere.

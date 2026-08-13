@@ -12,10 +12,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .hdr{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:6px}
 .hdr-title{font-size:15px;font-weight:700}
 .hdr-meta{font-size:11px;color:var(--text-tertiary,#888)}
-.chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
-.chip{background:var(--bg-secondary,#f4f4f4);border-radius:8px;padding:8px 14px;min-width:90px;text-align:center}
-.chip .n{font-size:20px;font-weight:700;line-height:1}
-.chip .l{font-size:10px;color:var(--text-tertiary,#888);margin-top:2px}
 .filters{display:flex;gap:5px;margin-bottom:12px;flex-wrap:wrap}
 .fb{padding:4px 11px;border-radius:20px;border:1px solid var(--border-primary,#ddd);background:transparent;color:var(--text-secondary,#555);font-size:11px;cursor:pointer;transition:all .15s}
 .fb:hover{background:var(--bg-secondary,#f4f4f4)}
@@ -97,7 +93,7 @@ details summary::-webkit-details-marker{display:none}
 <script>
 'use strict';
 
-const RL = ['Daily','WTD','MTD','YTD','1Y'];
+const RL = ['WTD','MTD','YTD','1Y'];
 const PILL_CLASSES = new Set([
   'pill-in','pill-out','pill-promo','pill-board','pill-interim',
   'pill-deal','pill-debt','pill-spin','pill-event'
@@ -159,8 +155,8 @@ function renderFiling(filing) {
   const flag = filing.flag
     ? `<span class="flagbd">⚑ ${esc(filing.flagnote || 'Flagged — verify relevance')}</span>`
     : '';
-  const docs = Number.isInteger(filing.docs) && filing.docs > 0
-    ? `<span class="doc-count">${filing.docs} document${filing.docs === 1 ? '' : 's'}</span>`
+  const docs = Number.isInteger(filing.docs) && filing.docs > 1
+    ? `<span class="doc-count">${filing.docs} documents</span>`
     : '';
   return `<section class="filing-bundle" data-tags="${esc(tags.join(' '))}">
     <div class="filing-head">
@@ -172,13 +168,30 @@ function renderFiling(filing) {
   </section>`;
 }
 function renderReturns(values) {
-  const row = Array.isArray(values) ? values.slice(0, 5) : [];
-  while (row.length < 5) row.push(null);
+  // Daily change is already shown beside the price; return tiles start at WTD.
+  const row = Array.isArray(values) ? values.slice(1, 5) : [];
+  while (row.length < 4) row.push(null);
   return row.map((value, index) => {
     const formatted = formatReturn(value);
     return `<div class="ret-c ${formatted.cls}"><div class="rl">${RL[index]}</div>` +
       `<div class="rv">${formatted.text}</div></div>`;
   }).join('');
+}
+function renderSummary(stats) {
+  const values = new Map((Array.isArray(stats) ? stats : []).flatMap(row => {
+    if (!Array.isArray(row) || row.length < 2 || !Number.isInteger(row[0])) return [];
+    return [[String(row[1]).toLowerCase(), row[0]]];
+  }));
+  const companies = values.get('companies');
+  const bundles = values.get('filing bundles');
+  const confirmed = values.get('confirmed');
+  const flagged = values.get('flagged');
+  const parts = [];
+  if (Number.isInteger(companies)) parts.push(`${companies} ${companies === 1 ? 'company' : 'companies'}`);
+  if (Number.isInteger(bundles) && bundles !== companies) parts.push(`${bundles} filing bundles`);
+  if (Number.isInteger(confirmed)) parts.push(`${confirmed} confirmed`);
+  if (Number.isInteger(flagged)) parts.push(`${flagged} flagged`);
+  return parts.join(' · ');
 }
 function renderRange(company) {
   const hasRange = num(company.lo) && num(company.hi) && num(company.cur) && company.hi > company.lo;
@@ -187,7 +200,7 @@ function renderRange(company) {
   const rangeClass = safeRangeClass(company.rc);
   const label = company.rb
     ? `<span class="rng-bd ${rangeClass}">${esc(company.rb)}</span>`
-    : `<span style="font-size:9px;color:#888">${position.toFixed(1)}% of 52W range</span>`;
+    : '<span style="font-size:9px;color:#888">52W range</span>';
   return `<div class="rng-blk">
     <div class="rng-lbl"><span>$${company.lo.toFixed(2)}</span><span>$${company.hi.toFixed(2)}</span></div>
     <div class="rng-bar"><div class="rng-mrk" style="left:${position.toFixed(1)}%"></div></div>
@@ -222,10 +235,10 @@ function renderFundamentals(company) {
 }
 function renderCard(company) {
   company = company && typeof company === 'object' ? company : {};
-  const returns = Array.isArray(company.r) && company.r.some(num)
+  const returns = Array.isArray(company.r) && company.r.slice(1, 5).some(num)
     ? `<div class="ret-tbl">${renderReturns(company.r)}</div>`
     : '';
-  const volume = company.v && company.v !== '—'
+  const volume = company.v && company.v !== '—' && company.v !== '0'
     ? `<div class="vol-blk"><div class="vol-n ${company.vh ? 'vol-hi' : ''}">${esc(company.v)}</div>` +
       `<div class="vol-l">${company.vr ? esc(company.vr) + ' avg vol' : ''}</div></div>`
     : '';
@@ -244,6 +257,9 @@ function renderCard(company) {
     ? `<div class="dvdr"></div><div class="stock-row">${stockContents}</div>`
     : '';
   const filings = (Array.isArray(company.fs) ? company.fs : []).map(renderFiling).join('');
+  const filingBlock = filings
+    ? `<div class="dvdr"></div><div class="filings">${filings}</div>`
+    : '';
   const description = company.d
     ? `<details><summary>About ${esc(company.n)}</summary><div class="desc">${esc(company.d)}</div></details>`
     : '';
@@ -252,9 +268,10 @@ function renderCard(company) {
       <div class="bdg" style="background:${safeBadgeBackground(company.bg)};color:${safeBadgeForeground(company.fg)}">${esc(company.t)}</div>
       <div><div class="co-name">${esc(company.n)}</div><div class="co-sub">${esc(company.s)}</div></div>
     </div>
+    ${filingBlock}
     ${stockBlock}
     ${renderFundamentals(company)}
-    <div class="dvdr"></div><div class="filings">${filings}</div>${description}
+    ${description}
   </article>`;
 }
 function applyFilter(tag, button) {
@@ -295,16 +312,20 @@ function render() {
     return `<button class="fb${index === 0 ? ' active' : ''}" data-filter="${esc(safeId)}">${esc(label)}</button>`;
   }).join('');
   const root = document.getElementById('root');
+  const summary = renderSummary(stats);
+  const headerMeta = [
+    `${esc(data.ftype || '8-K / 6-K')} filings`,
+    esc(data.range || ''),
+    esc(summary),
+    'SEC EDGAR'
+  ].filter(Boolean).join(' · ');
   root.innerHTML = `<div class="hdr"><div><div class="hdr-title">${esc(data.title || 'Filing Monitor')}</div>` +
-    `<div class="hdr-meta">${esc(data.ftype || '8-K / 6-K')} filings · ${esc(data.range || '')} · SEC EDGAR</div></div></div>` +
-    `<div class="chips">${stats.map(row => {
-      const [value, label] = Array.isArray(row) ? row : [];
-      return `<div class="chip"><div class="n">${esc(value)}</div><div class="l">${esc(label)}</div></div>`;
-    }).join('')}</div><div class="filters">${filterButtons}</div>${body}`;
+    `<div class="hdr-meta">${headerMeta}</div></div></div>` +
+    `<div class="filters">${filterButtons}</div>${body}`;
   wireFilters();
 }
 
-globalThis.DFinFilingMonitor = {applyFilter,formatReturn,renderCard,safeSecUrl,safeTags};
+globalThis.DFinFilingMonitor = {applyFilter,formatReturn,renderCard,renderSummary,safeSecUrl,safeTags};
 
 try {
   render();

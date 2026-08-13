@@ -449,6 +449,38 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertTrue(summary["bundle_id"].startswith("doc:"))
         self.assertEqual(summary["source_uri"], "")
 
+    def test_sec_identity_uses_archive_paths_or_the_exact_viewer_doc_parameter(self):
+        viewer_result = _filing_result()
+        viewer_result["meta_data"]["source_uri"] = (
+            "https://www.sec.gov/ixviewer/doc/action?doc=%2FArchives%2Fedgar%2Fdata%2F"
+            "789019%2F000078901926000001%2Fmain.htm"
+        )
+        unrelated_query = _filing_result(doc_uuid="query-only")
+        unrelated_query["meta_data"]["source_uri"] = (
+            "https://www.sec.gov/search?next=%2FArchives%2Fedgar%2Fdata%2F"
+            "789019%2F000078901926000001%2Fmain.htm"
+        )
+
+        self.assertEqual(
+            FILING._sec_cik_and_accession(viewer_result),
+            ("0000789019", "0000789019-26-000001"),
+        )
+        self.assertEqual(FILING._sec_cik_and_accession(unrelated_query), (None, None))
+
+    def test_non_finite_scores_are_normalized_and_invalid_sidecars_are_rejected(self):
+        result = _filing_result(score=float("nan"))
+        summary = FILING._summaries_from_bundles(FILING.group_results([result]))[0]
+
+        self.assertEqual(summary["score"], 0.0)
+        self.assertTrue(FILING._valid_saved_summary(summary))
+
+        invalid_count = dict(summary, document_count=-1)
+        invalid_score = dict(summary, score=float("inf"))
+        oversized_score = dict(summary, score=10**1000)
+        self.assertFalse(FILING._valid_saved_summary(invalid_count))
+        self.assertFalse(FILING._valid_saved_summary(invalid_score))
+        self.assertFalse(FILING._valid_saved_summary(oversized_score))
+
     def test_null_ticker_issuers_do_not_share_one_bucket(self):
         results = [
             _filing_result(ticker=None, cik="111", accession="1" * 18),
@@ -533,6 +565,33 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertEqual(payload["shown_count"], 5)
         self.assertEqual(payload["remaining_bundle_count"], 12)
         self.assertTrue(payload["truncated"])
+        self.assertFalse(payload["summary_index_used"])
+
+    def test_summary_page_groups_results_once(self):
+        results = [
+            _filing_result(
+                cik=str(index + 1),
+                accession=str(index + 1).zfill(18),
+                doc_uuid=f"doc-{index}",
+            )
+            for index in range(20)
+        ]
+
+        with mock.patch.object(
+            FILING,
+            "group_results",
+            wraps=FILING.group_results,
+        ) as grouped:
+            page = FILING._summary_page(
+                results,
+                limit=5,
+                offset=3,
+                preview_chars=150,
+            )
+
+        self.assertEqual(grouped.call_count, 1)
+        self.assertEqual(page["bundle_count"], 20)
+        self.assertEqual(page["shown_count"], 5)
 
     def test_sec_provenance_rejects_credentials_ports_and_other_hosts(self):
         valid = "https://www.sec.gov/Archives/edgar/data/1/example.htm"
@@ -727,7 +786,7 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertIn("search_identity_conflict", conflict_state["identity_issues"])
         self.assertFalse(FILING.coverage_audit(conflict_state)["complete"])
 
-    def test_unexpected_in_scope_filer_blocks_coverage(self):
+    def test_new_cik_is_excluded_without_blocking_frozen_census_coverage(self):
         state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
         unexpected = _filing_result(
             ticker="AAPL.US",
@@ -737,21 +796,31 @@ class FilingArtifactTests(unittest.TestCase):
             doc_uuid="apple-doc",
         )
 
-        FILING.add_broad_search_results(
+        added, eligible = FILING.add_broad_search_results(
             state,
             [_filing_result(), unexpected],
             "8-K",
             THEMATIC_QUERIES,
             response_id=_response_id("unexpected-filer-response"),
+            return_eligible=True,
         )
         audit = FILING.coverage_audit(state)
 
-        self.assertFalse(audit["complete"])
-        self.assertEqual(audit["unexpected_filer_count"], 1)
-        self.assertIn("unexpected_in_scope_filer", audit["inconsistencies"])
+        self.assertEqual(added, 1)
+        self.assertTrue(audit["complete"])
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(eligible[0]["ticker"], "MSFT.US")
+        self.assertEqual(audit["excluded_post_start_filing_count"], 1)
+        self.assertEqual(
+            audit["post_start_exclusion_note"],
+            "1 filing was detected after the scan began but is not included here.",
+        )
+        self.assertNotIn("0000320193", state["filers"])
+        self.assertEqual(FILING.missing_filers(state)["missing_filer_count"], 0)
 
-    def test_same_cik_accession_missing_from_census_blocks_coverage(self):
+    def test_same_cik_accession_missing_from_census_is_included_as_companion(self):
         state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        frozen_accessions = dict(state["accessions"])
         FILING.add_broad_search_results(
             state,
             [_filing_result(accession="000078901926999999")],
@@ -761,9 +830,436 @@ class FilingArtifactTests(unittest.TestCase):
         )
         audit = FILING.coverage_audit(state)
 
-        self.assertFalse(audit["complete"])
-        self.assertEqual(audit["unexpected_accession_count"], 1)
-        self.assertIn("unexpected_in_scope_accession", audit["inconsistencies"])
+        self.assertTrue(audit["complete"])
+        self.assertEqual(audit["included_companion_filing_count"], 1)
+        self.assertEqual(state["accessions"], frozen_accessions)
+        self.assertIn("0000789019-26-999999", state["included_companions"])
+
+    def test_conflicting_new_accession_is_not_recorded_as_companion(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload(
+                [
+                    _accession_row(),
+                    _accession_row(
+                        cik="0000320193",
+                        accession="0000320193-26-000001",
+                        tickers=["AAPL.US"],
+                        issuer_name="Apple Inc.",
+                    ),
+                ]
+            ),
+            ["8-K"],
+        )
+        conflict = _filing_result(
+            ticker="AAPL.US",
+            cik="789019",
+            accession="000078901926999999",
+        )
+
+        _added, eligible = FILING.add_broad_search_results(
+            state,
+            [conflict],
+            "8-K",
+            THEMATIC_QUERIES,
+            response_id=_response_id("conflicting-new-accession"),
+            return_eligible=True,
+        )
+
+        self.assertEqual(eligible, [])
+        self.assertEqual(state["included_companions"], {})
+        self.assertIn("search_identity_conflict", state["identity_issues"])
+        self.assertFalse(FILING.coverage_audit(state)["complete"])
+
+    def test_census_aware_paging_rechecks_accession_identity(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload(
+                [
+                    _accession_row(),
+                    _accession_row(
+                        cik="0000320193",
+                        accession="0000320193-26-000001",
+                        tickers=["AAPL.US"],
+                        issuer_name="Apple Inc.",
+                    ),
+                ]
+            ),
+            ["8-K"],
+        )
+        conflict = _filing_result(
+            ticker="MSFT.US",
+            cik="789019",
+            accession="000032019326000001",
+        )
+
+        _added, eligible = FILING.add_broad_search_results(
+            state,
+            [conflict],
+            "8-K",
+            THEMATIC_QUERIES,
+            response_id=_response_id("paging-accession-conflict"),
+            return_eligible=True,
+        )
+
+        self.assertEqual(eligible, [])
+        self.assertEqual(FILING._eligible_results_for_state(state, [conflict]), [])
+
+    def test_post_census_records_are_deduplicated_by_accession(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        first = _filing_result(
+            ticker="AAPL.US",
+            cik="320193",
+            accession="000032019326000001",
+            doc_uuid="apple-main",
+            name="Apple Inc.",
+        )
+        second = _filing_result(
+            ticker="AAPL.US",
+            cik="320193",
+            accession="000032019326000001",
+            doc_uuid="apple-exhibit",
+            document="exhibit99.htm",
+            name="Apple Inc.",
+        )
+
+        _added, eligible = FILING.add_broad_search_results(
+            state,
+            [_filing_result(), first, second],
+            "8-K",
+            THEMATIC_QUERIES,
+            response_id=_response_id("deduplicated-post-census"),
+            return_eligible=True,
+        )
+
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(len(state["excluded_post_census"]), 1)
+        self.assertEqual(
+            FILING.coverage_audit(state)["excluded_post_start_filing_count"],
+            1,
+        )
+
+    def test_ticker_search_accepts_cross_form_companion_for_census_company(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        FILING.add_broad_search_results(
+            state,
+            [],
+            "8-K",
+            THEMATIC_QUERIES,
+            result_count=0,
+            attested_empty=True,
+        )
+        companion = _filing_result(
+            filing_type="6-K",
+            accession="000078901926000002",
+            doc_uuid="companion-6k",
+        )
+
+        cik, eligible = FILING.mark_filer(
+            state,
+            "MSFT.US",
+            "checked",
+            results=[companion],
+            result_count=1,
+            queries=THEMATIC_QUERIES,
+            response_id=_response_id("cross-form-companion"),
+            return_eligible=True,
+        )
+
+        self.assertEqual(cik, "0000789019")
+        self.assertEqual(eligible, [companion])
+        self.assertEqual(len(state["included_companions"]), 1)
+        self.assertTrue(FILING.coverage_audit(state)["complete"])
+
+    def test_combined_broad_ingest_hides_new_companies_from_summaries(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload(
+                [
+                    _accession_row(),
+                    _accession_row(
+                        cik="0001652044",
+                        accession="0001652044-26-000001",
+                        tickers=["GOOG.US"],
+                        issuer_name="Alphabet Inc.",
+                    ),
+                ]
+            ),
+            ["8-K"],
+        )
+        second_census_company = _filing_result(
+            ticker="GOOG.US",
+            cik="1652044",
+            accession="000165204426000001",
+            doc_uuid="alphabet-doc",
+            name="Alphabet Inc.",
+        )
+        new_company = _filing_result(
+            ticker="AAPL.US",
+            cik="320193",
+            accession="000032019326000001",
+            doc_uuid="apple-doc",
+            name="Apple Inc.",
+        )
+        body = json.dumps(
+            {
+                "count": 3,
+                "results": [_filing_result(), second_census_company, new_company],
+            }
+        ).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_path = directory / "coverage.json"
+            search_path = directory / "search.json"
+            FILING._write_state(state_path, state)
+            stdout = io.StringIO()
+
+            with (
+                mock.patch.object(FILING, "fetch_artifact_bytes", return_value=body),
+                mock.patch(
+                    "sys.stdin",
+                    io.StringIO("https://www.dfin.pro/api/v1/artifacts/search"),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = FILING.main(
+                    [
+                        "coverage-add-search",
+                        "--state",
+                        str(state_path),
+                        "--expected-form",
+                        "8-K",
+                        "--fetch",
+                        "--save",
+                        str(search_path),
+                        "--query",
+                        THEMATIC_QUERIES[0],
+                        "--query",
+                        THEMATIC_QUERIES[1],
+                        "--limit",
+                        "1",
+                    ]
+                )
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(result, 0)
+            self.assertEqual(output["shown_count"], 1)
+            self.assertEqual(output["shown"][0]["ticker"], "MSFT.US")
+            self.assertTrue(output["truncated"])
+            self.assertEqual(output["excluded_post_start_filing_count"], 1)
+            self.assertTrue(output["summary_index_available"])
+            self.assertEqual(search_path.read_bytes(), body)
+            summary_index_path = FILING._summary_index_path(search_path)
+            summary_index = json.loads(summary_index_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary_index["kind"], "filing_search_summary_index")
+            self.assertEqual(summary_index["bundle_count"], 2)
+            self.assertEqual(summary_index["artifact_size"], len(body))
+            self.assertIsInstance(summary_index["artifact_mtime_ns"], int)
+            self.assertNotIn("AAPL.US", json.dumps(summary_index))
+            self.assertNotIn("doc_uuid", json.dumps(summary_index))
+
+            summary_stdout = io.StringIO()
+
+            with (
+                mock.patch.object(
+                    FILING,
+                    "load_artifact",
+                    side_effect=AssertionError("raw artifact was reopened"),
+                ),
+                mock.patch.object(
+                    FILING,
+                    "group_results",
+                    side_effect=AssertionError("raw results were regrouped"),
+                ),
+                mock.patch("sys.stdout", summary_stdout),
+            ):
+                summary_result = FILING.main(
+                    [
+                        "summarize",
+                        "--state",
+                        str(state_path),
+                        "--artifact",
+                        str(search_path),
+                        "--offset",
+                        "1",
+                    ]
+                )
+
+            summary = json.loads(summary_stdout.getvalue())
+            self.assertEqual(summary_result, 0)
+            self.assertEqual(summary["shown_count"], 1)
+            self.assertEqual(summary["shown"][0]["ticker"], "GOOG.US")
+            self.assertTrue(summary["summary_index_used"])
+
+            summary_index_path.write_text("{", encoding="utf-8")
+            fallback_stdout = io.StringIO()
+
+            with mock.patch("sys.stdout", fallback_stdout):
+                fallback_result = FILING.main(
+                    [
+                        "summarize",
+                        "--state",
+                        str(state_path),
+                        "--artifact",
+                        str(search_path),
+                        "--offset",
+                        "1",
+                    ]
+                )
+
+            fallback = json.loads(fallback_stdout.getvalue())
+            self.assertEqual(fallback_result, 0)
+            self.assertFalse(fallback["summary_index_used"])
+            self.assertEqual(fallback["shown"][0]["ticker"], "GOOG.US")
+
+    def test_combined_ticker_ingest_records_and_summarizes_companion(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        FILING.add_broad_search_results(
+            state,
+            [],
+            "8-K",
+            THEMATIC_QUERIES,
+            result_count=0,
+            attested_empty=True,
+        )
+        companion = _filing_result(
+            filing_type="6-K",
+            accession="000078901926000002",
+            doc_uuid="companion-6k",
+        )
+        body = json.dumps({"count": 1, "results": [companion]}).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_path = directory / "coverage.json"
+            search_path = directory / "ticker-search.json"
+            FILING._write_state(state_path, state)
+            stdout = io.StringIO()
+
+            with (
+                mock.patch.object(FILING, "fetch_artifact_bytes", return_value=body),
+                mock.patch(
+                    "sys.stdin",
+                    io.StringIO("https://www.dfin.pro/api/v1/artifacts/ticker-search"),
+                ),
+                mock.patch("sys.stdout", stdout),
+            ):
+                result = FILING.main(
+                    [
+                        "coverage-mark",
+                        "--state",
+                        str(state_path),
+                        "--ticker",
+                        "MSFT.US",
+                        "--status",
+                        "checked",
+                        "--fetch",
+                        "--save",
+                        str(search_path),
+                        "--query",
+                        THEMATIC_QUERIES[0],
+                        "--query",
+                        THEMATIC_QUERIES[1],
+                    ]
+                )
+
+            output = json.loads(stdout.getvalue())
+            self.assertEqual(result, 0)
+            self.assertEqual(output["status"], "checked")
+            self.assertEqual(output["shown_count"], 1)
+            self.assertEqual(output["included_companion_filing_count"], 1)
+            self.assertEqual(output["excluded_post_start_filing_count"], 0)
+            self.assertTrue(FILING.coverage_audit(FILING._load_state(state_path))["complete"])
+
+    def test_state_aware_summary_rejects_an_artifact_after_search_reset(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact_path = directory / "search.json"
+            state_path = directory / "coverage.json"
+            artifact_path.write_text(
+                json.dumps({"count": 1, "results": [_filing_result()]}),
+                encoding="utf-8",
+            )
+            results, count, response_id, artifact_id = FILING.load_search_response(
+                artifact_path
+            )
+            FILING.add_broad_search_results(
+                state,
+                results,
+                "8-K",
+                THEMATIC_QUERIES,
+                result_count=count,
+                response_id=response_id,
+                artifact_id=artifact_id,
+            )
+            FILING.reset_searches(state)
+            FILING._write_state(state_path, state)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr):
+                result = FILING.main(
+                    [
+                        "summarize",
+                        "--state",
+                        str(state_path),
+                        "--artifact",
+                        str(artifact_path),
+                    ]
+                )
+
+        self.assertEqual(result, 2)
+        self.assertIn("not bound to an active coverage receipt", stderr.getvalue())
+
+    def test_state_aware_summary_rejects_changed_artifact_contents(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact_path = directory / "search.json"
+            state_path = directory / "coverage.json"
+            artifact_path.write_text(
+                json.dumps({"count": 1, "results": [_filing_result()]}),
+                encoding="utf-8",
+            )
+            results, count, response_id, artifact_id = FILING.load_search_response(
+                artifact_path
+            )
+            FILING.add_broad_search_results(
+                state,
+                results,
+                "8-K",
+                THEMATIC_QUERIES,
+                result_count=count,
+                response_id=response_id,
+                artifact_id=artifact_id,
+            )
+            FILING._write_state(state_path, state)
+            artifact_path.write_text(
+                json.dumps(
+                    {
+                        "count": 1,
+                        "results": [
+                            _filing_result(content="changed after receipt binding")
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr):
+                result = FILING.main(
+                    [
+                        "summarize",
+                        "--state",
+                        str(state_path),
+                        "--artifact",
+                        str(artifact_path),
+                    ]
+                )
+
+        self.assertEqual(result, 2)
+        self.assertIn("not bound to an active coverage receipt", stderr.getvalue())
 
     def test_ambiguous_ticker_is_nonblocking_after_authoritative_cik_matches(self):
         state = FILING._enumeration_state(
@@ -921,27 +1417,61 @@ class FilingArtifactTests(unittest.TestCase):
             name="Apple Inc.",
         )
 
+        _cik, eligible = FILING.mark_filer(
+            state,
+            "MSFT.US",
+            "checked",
+            results=[wrong_filer],
+            result_count=1,
+            queries=THEMATIC_QUERIES,
+            response_id=_response_id("checked-new-filer"),
+            return_eligible=True,
+        )
+        self.assertEqual(eligible, [])
+        self.assertEqual(len(state["excluded_post_census"]), 1)
+        self.assertTrue(FILING.coverage_audit(state)["complete"])
+
+    def test_ticker_search_rejects_a_different_census_filer(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload(
+                [
+                    _accession_row(),
+                    _accession_row(
+                        cik="0000320193",
+                        accession="0000320193-26-000001",
+                        tickers=["AAPL.US"],
+                        issuer_name="Apple Inc.",
+                    ),
+                ]
+            ),
+            ["8-K"],
+        )
+        FILING.add_broad_search_results(
+            state,
+            [],
+            "8-K",
+            THEMATIC_QUERIES,
+            result_count=0,
+            attested_empty=True,
+        )
+
         with self.assertRaisesRegex(FILING.HelperError, "different filer"):
             FILING.mark_filer(
                 state,
                 "MSFT.US",
                 "checked",
-                results=[wrong_filer],
+                results=[
+                    _filing_result(
+                        ticker="AAPL.US",
+                        cik="320193",
+                        accession="000032019326000001",
+                        name="Apple Inc.",
+                    )
+                ],
                 result_count=1,
                 queries=THEMATIC_QUERIES,
-                response_id=_response_id("checked-wrong-filer"),
+                response_id=_response_id("checked-other-census-filer"),
             )
-
-        FILING.mark_filer(
-            state,
-            "MSFT.US",
-            "checked",
-            results=[],
-            result_count=0,
-            queries=THEMATIC_QUERIES,
-            attested_empty=True,
-        )
-        self.assertTrue(FILING.coverage_audit(state)["complete"])
 
     def test_empty_search_attestations_are_bound_to_each_filer(self):
         state = FILING._enumeration_state(
@@ -1352,8 +1882,13 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertEqual(audit_result, 0)
         self.assertTrue(json.loads(audit_stdout.getvalue())["complete"])
 
-    def test_fetched_census_is_saved_and_can_reset_the_same_population(self):
-        body = json.dumps(_enumeration_payload()).encode("utf-8")
+    def test_fetched_census_is_saved_once_and_searches_reset_locally(self):
+        body = json.dumps(
+            _enumeration_payload(
+                complete=False,
+                issues=["malformed_source_record"],
+            )
+        ).encode("utf-8")
 
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
@@ -1387,6 +1922,7 @@ class FilingArtifactTests(unittest.TestCase):
             self.assertEqual(output["days"], 2)
 
             state = FILING._load_state(state_path)
+            fingerprint = state["census_fingerprint"]
             FILING.add_broad_search_results(
                 state,
                 [_filing_result()],
@@ -1400,6 +1936,29 @@ class FilingArtifactTests(unittest.TestCase):
             with mock.patch("sys.stdout", reset_stdout):
                 reset_result = FILING.main(
                     [
+                        "coverage-reset-searches",
+                        "--state",
+                        str(state_path),
+                    ]
+                )
+
+            reset_state = FILING._load_state(state_path)
+            self.assertEqual(reset_result, 0)
+            self.assertEqual(reset_state["broad_searches"], {})
+            self.assertEqual(reset_state["search_plan"], None)
+            self.assertEqual(reset_state["census_fingerprint"], fingerprint)
+            self.assertEqual(reset_state["enumeration"]["as_of"], "2026-08-06T18:42:00Z")
+            self.assertEqual(
+                reset_state["enumeration"]["issues"],
+                ["malformed_source_record"],
+            )
+
+            before = state_path.read_bytes()
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr):
+                duplicate_result = FILING.main(
+                    [
                         "coverage-init",
                         "--state",
                         str(state_path),
@@ -1410,10 +1969,9 @@ class FilingArtifactTests(unittest.TestCase):
                     ]
                 )
 
-            reset_state = FILING._load_state(state_path)
-            self.assertEqual(reset_result, 0)
-            self.assertEqual(reset_state["broad_searches"], {})
-            self.assertEqual(reset_state["search_plan"], None)
+            self.assertEqual(duplicate_result, 2)
+            self.assertIn("only once", stderr.getvalue())
+            self.assertEqual(state_path.read_bytes(), before)
 
     def test_coverage_init_fetch_requires_a_saved_census_path(self):
         stderr = io.StringIO()
@@ -1744,7 +2302,10 @@ class FilingArtifactTests(unittest.TestCase):
             self.assertEqual(failed_output["status"], "failed")
             self.assertEqual(failed_output["broad_search_failure_count"], 1)
 
-            self.assertEqual(run(init)[0], 0)
+            self.assertEqual(
+                run(["coverage-reset-searches", "--state", str(state_path)])[0],
+                0,
+            )
             self.assertEqual(
                 run(
                     [
@@ -1808,6 +2369,8 @@ class DashboardBuilderTests(unittest.TestCase):
 
         self.assertEqual(fields["ticker"], "MSFT.US")
         self.assertEqual(fields["r"], [2.54, None, 0.0, 1.243, -6.897])
+        self.assertEqual(fields["v"], "32.8M")
+        self.assertEqual(fields["vr"], "1.05×")
         self.assertEqual([row[0] for row in fields["eps"]], [1, 0, -1, 1])
         self.assertEqual(
             [row[1].split(":", 1)[0] for row in fields["eps"]],
@@ -1815,6 +2378,20 @@ class DashboardBuilderTests(unittest.TestCase):
         )
         self.assertNotIn("database", fields)
         self.assertNotIn("user", fields)
+        self.assertNotIn("fy_end", fields)
+
+    def test_zero_volume_is_treated_as_unavailable(self):
+        payload = _stock_payload()
+        payload["price"]["volume"] = "0"
+
+        fields = BUILDER.extract_stock_fields(payload)
+
+        self.assertEqual(fields["v"], "—")
+        self.assertIsNone(fields["vr"])
+        self.assertFalse(fields["vh"])
+
+    def test_oversized_numeric_text_is_treated_as_unavailable(self):
+        self.assertIsNone(BUILDER._number("9" * 400))
 
     def test_builds_nested_filings_scales_ratios_and_reports_status(self):
         data, statuses, cache = BUILDER.build_data(
@@ -1829,7 +2406,7 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertEqual(company["roic"], "28.0%")
         self.assertEqual(company["em"], "56.9%")
         self.assertEqual(company["nd"], "0.51×")
-        self.assertEqual(company["rvintage"], "FY2025 · June year-end")
+        self.assertEqual(company["rvintage"], "FY2025")
         self.assertEqual(company["fs"][0]["tags"], ["confirmed", "appointments"])
         self.assertEqual(data["stats"][0], [1, "Companies"])
         self.assertEqual(data["stats"][1], [1, "Filing bundles"])
@@ -1973,17 +2550,31 @@ class DashboardBuilderTests(unittest.TestCase):
             )
 
     def test_malformed_supplied_stock_cik_fails_loudly(self):
-        payload = _stock_payload()
-        payload["profile"]["cik"] = "bad-cik"
+        for malformed_cik in ("bad-cik", "0", "12345678901"):
+            with self.subTest(cik=malformed_cik):
+                payload = _stock_payload()
+                payload["profile"]["cik"] = malformed_cik
 
-        with self.assertRaisesRegex(
-            BUILDER.HelperError,
-            "Stock context identity mismatch for MSFT.US",
-        ):
-            BUILDER.build_data(
-                _manifest(),
-                stock_fetcher=lambda _url: _stock_batch(payload),
-            )
+                with self.assertRaisesRegex(
+                    BUILDER.HelperError,
+                    "Stock context identity mismatch for MSFT.US",
+                ):
+                    BUILDER.build_data(
+                        _manifest(),
+                        stock_fetcher=lambda _url: _stock_batch(payload),
+                    )
+
+    def test_malformed_manifest_company_cik_fails_loudly(self):
+        for malformed_cik in ("bad-cik", "0", "12345678901"):
+            with self.subTest(cik=malformed_cik):
+                manifest = _manifest(stock_url=None)
+                manifest["companies"][0]["cik"] = malformed_cik
+
+                with self.assertRaisesRegex(
+                    BUILDER.HelperError,
+                    "malformed company CIK",
+                ):
+                    BUILDER.build_data(manifest)
 
     def test_ratio_ticker_mismatch_fails_loudly(self):
         manifest = _manifest(stock_url=None)
@@ -2423,15 +3014,165 @@ class DashboardBuilderTests(unittest.TestCase):
         self.assertNotIn("eps", rows[0])
         self.assertNotIn("roe", rows[0])
 
+    def test_merges_api_stock_context_batches_of_at_most_ten(self):
+        manifest = _manifest(stock_url=None)
+        companies = []
+        batches = []
+        urls = []
+
+        for index in range(11):
+            ticker = f"T{index}.US"
+            cik = str(index + 1).zfill(10)
+            company = json.loads(json.dumps(manifest["companies"][0]))
+            company.update({"ticker": ticker, "cik": cik, "name": f"Company {index}"})
+            company["ratios"]["ticker"] = ticker
+            company["filings"][0]["id"] = f"sec:{cik}:accession-{index}"
+            companies.append(company)
+
+            payload = _stock_payload()
+            payload.update({"ticker": ticker, "company_name": f"Company {index}"})
+            payload["profile"]["cik"] = cik
+
+            if index in (0, 10):
+                batches.append([])
+                urls.append(
+                    f"https://www.dfin.pro/api/v1/artifacts/StockBatch{len(urls)}"
+                )
+            batches[-1].append(payload)
+
+        manifest["companies"] = companies
+        manifest["stock_context_urls"] = urls
+        responses = {
+            url: {
+                "count": len(payloads),
+                "success_count": len(payloads),
+                "error_count": 0,
+                "results": {
+                    payload["ticker"]: {"data": payload} for payload in payloads
+                },
+            }
+            for url, payloads in zip(urls, batches)
+        }
+        calls = []
+
+        data, statuses, cache = BUILDER.build_data(
+            manifest,
+            stock_fetcher=lambda url: (calls.append(url), responses[url])[1],
+        )
+
+        self.assertEqual(calls, urls)
+        self.assertEqual(len(data["cos"]), 11)
+        self.assertTrue(all(row["stock_context"] == "ok" for row in statuses))
+        self.assertEqual(set(cache), {f"T{index}.US" for index in range(11)})
+
+    def test_merges_complete_inline_stock_context_batches(self):
+        manifest = _manifest(stock_url=None)
+        first = _stock_batch()
+        second_payload = _stock_payload()
+        second_payload.update({"ticker": "AAPL.US", "company_name": "Apple Inc."})
+        second_payload["profile"]["cik"] = "0000320193"
+        second = _stock_batch(second_payload, ticker="AAPL.US")
+        company = json.loads(json.dumps(manifest["companies"][0]))
+        company.update({"ticker": "AAPL.US", "cik": "0000320193"})
+        company["ratios"]["ticker"] = "AAPL.US"
+        company["filings"][0]["id"] = "sec:0000320193:apple-accession"
+        manifest["companies"].append(company)
+        manifest["stock_context_batches"] = [first, second]
+
+        data, statuses, cache = BUILDER.build_data(manifest)
+
+        self.assertEqual(len(data["cos"]), 2)
+        self.assertTrue(all(row["stock_context"] == "ok" for row in statuses))
+        self.assertEqual(set(cache), {"MSFT.US", "AAPL.US"})
+
     def test_rejects_inline_and_artifact_stock_sources_together(self):
         manifest = _manifest()
         manifest["stock_context"] = _stock_batch()
 
         with self.assertRaisesRegex(
             BUILDER.HelperError,
-            "either stock_context_url or stock_context",
+            "exactly one of stock_context_urls",
         ):
             BUILDER.build_data(manifest)
+
+    def test_rejects_duplicate_tickers_across_stock_context_batches(self):
+        manifest = _manifest(stock_url=None)
+        manifest["stock_context_batches"] = [_stock_batch(), _stock_batch()]
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "repeat ticker results: MSFT.US",
+        ):
+            BUILDER.build_data(manifest)
+
+    def test_rejects_stock_context_batch_above_api_limit(self):
+        payload = _stock_payload()
+        batch = {
+            "count": 11,
+            "success_count": 11,
+            "error_count": 0,
+            "results": {
+                f"T{index}.US": {
+                    "data": dict(payload, ticker=f"T{index}.US")
+                }
+                for index in range(11)
+            },
+        }
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "does not contain ticker-keyed results",
+        ):
+            BUILDER._stock_batch_results(batch)
+
+    def test_successful_batches_are_cached_when_another_needs_refresh(self):
+        manifest = _manifest(stock_url=None)
+        second = json.loads(json.dumps(manifest["companies"][0]))
+        second["ticker"] = "AAPL.US"
+        second["name"] = "Apple Inc."
+        second["ratios"]["ticker"] = "AAPL.US"
+        second["filings"][0]["id"] = "sec:0000320193:apple-accession"
+        manifest["companies"].append(second)
+        urls = [
+            "https://www.dfin.pro/api/v1/artifacts/StockGood",
+            "https://www.dfin.pro/api/v1/artifacts/StockRefresh",
+        ]
+        manifest["stock_context_urls"] = urls
+
+        def fetch(url):
+            if url == urls[1]:
+                raise BUILDER.ArtifactRefreshRequired("request one fresh URL")
+            return _stock_batch()
+
+        data, statuses, cache = BUILDER.build_data(manifest, stock_fetcher=fetch)
+
+        self.assertEqual(
+            {row["ticker"]: row["stock_context"] for row in statuses},
+            {"MSFT.US": "ok", "AAPL.US": "refresh_required"},
+        )
+        self.assertEqual(set(cache), {"MSFT.US"})
+        apple = next(company for company in data["cos"] if company["t"] == "AAPL.US")
+        self.assertEqual(apple["p"], "—")
+
+    def test_successful_batches_must_cover_every_uncached_ticker(self):
+        manifest = _manifest(stock_url=None)
+        second = json.loads(json.dumps(manifest["companies"][0]))
+        second["ticker"] = "AAPL.US"
+        second["ratios"]["ticker"] = "AAPL.US"
+        second["filings"][0]["id"] = "sec:0000320193:apple-accession"
+        manifest["companies"].append(second)
+        manifest["stock_context_urls"] = [
+            "https://www.dfin.pro/api/v1/artifacts/StockOnlyMicrosoft"
+        ]
+
+        with self.assertRaisesRegex(
+            BUILDER.HelperError,
+            "missing requested ticker results: AAPL.US",
+        ):
+            BUILDER.build_data(
+                manifest,
+                stock_fetcher=lambda _url: _stock_batch(),
+            )
 
     def test_shared_batch_keeps_failed_ticker_card_without_enrichment(self):
         manifest = _manifest()
@@ -2626,9 +3367,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("delivery: inline", skill)
         self.assertIn("and `delivery: api`", skill)
         self.assertNotIn("automatically based on response size", skill)
-        self.assertIn("Call `get_stock_context` once with all resolved `tickers`", skill)
-        self.assertIn('"stock_context_url": "<single-use batch capability>"', skill)
-        self.assertIn('"stock_context": {<complete ticker-keyed batch>}', skill)
+        self.assertIn("into batches of at most 10", skill)
+        self.assertIn('"stock_context_urls": ["<single-use batch capability>"', skill)
+        self.assertIn('"stock_context_batches": [{<complete ticker-keyed batch>}', skill)
         self.assertIn(
             "including `format`, `count`, `success_count`, `error_count`, and `results`",
             skill,
@@ -2663,18 +3404,25 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("use the same command with `--empty`", skill)
         self.assertIn("rejects byte-identical response payloads", skill)
         self.assertIn("Failed filers leave the pending queue", skill)
-        self.assertIn("rerun `coverage-init` with `--artifact <census-json-path>`", skill)
+        self.assertIn("coverage-reset-searches", skill)
+        self.assertIn("Call `list_latest_filings` exactly once per scan", skill)
+        self.assertIn("Never re-run `coverage-init` or `list_latest_filings`", skill)
+        self.assertNotIn("rerun `coverage-init` with `--artifact <census-json-path>`", skill)
         self.assertIn("narrowing the coverage scope cannot satisfy reconciliation", skill)
         self.assertIn("`timeout`, `rate_limited`, `malformed_response`", skill)
         self.assertIn("coverage-audit", skill)
         self.assertIn("inclusive windows of one to three calendar days", skill)
         self.assertIn("plausible SEC disclosure paths", skill)
-        self.assertIn("expand the form set, rerun enumeration", skill)
+        self.assertIn("start a new scan only when expanded universe-wide coverage", skill)
+        self.assertNotIn("expand the form set, rerun enumeration", skill)
         self.assertIn("**Omit `filing_type`**", skill)
         self.assertIn("methodology_delegation", skill)
         self.assertIn("Do not create one worker per ticker", skill)
         self.assertIn("does not prove perfect thematic recall", skill)
         self.assertIn("request_binding: agent_attested", skill)
+        self.assertIn("post_start_exclusion_note", skill)
+        self.assertIn(".summary-index.json", skill)
+        self.assertIn("do not reopen, refilter, or regroup", skill)
         self.assertIn("both empty and non-empty responses", skill)
         self.assertIn("skip reconciliation and `coverage-audit`", skill)
         self.assertIn("tickerless filer already matched by SEC-source CIK", skill)

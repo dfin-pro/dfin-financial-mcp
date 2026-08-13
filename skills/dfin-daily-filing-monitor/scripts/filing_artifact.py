@@ -7,6 +7,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -41,7 +42,9 @@ DEFAULT_EVIDENCE_CHARS = 800
 MAX_SUMMARIES = 15
 MAX_DOC_UUIDS = 20
 MAX_COVERAGE_ROWS = 50
-COVERAGE_STATE_VERSION = 3
+COVERAGE_STATE_VERSION = 4
+SUMMARY_INDEX_VERSION = 1
+SUMMARY_INDEX_SUFFIX = ".summary-index.json"
 ALLOWED_FAILURE_REASONS = frozenset(
     {
         "artifact_unavailable",
@@ -329,12 +332,26 @@ def _source_metadata(result):
 def _sec_cik_and_accession(result):
     """Return issuer CIK/accession only from a validated SEC archive source."""
     source_uri = validate_sec_url(_source_metadata(result).get("source_uri"))
-    match = SEC_SOURCE_RE.search(source_uri or "")
+    parsed_source = urlparse(source_uri) if source_uri else None
+    source_paths = [parsed_source.path] if parsed_source else []
+
+    if parsed_source and parsed_source.path.lower() in {"/ix", "/ixviewer/doc/action"}:
+        source_paths.extend(parse_qs(parsed_source.query).get("doc", []))
+
+    match = next(
+        (
+            matched
+            for source_path in source_paths
+            if (matched := SEC_SOURCE_RE.search(source_path))
+        ),
+        None,
+    )
 
     if match:
-        return match.group("cik").zfill(10), _normalized_accession(
-            match.group("accession")
-        )
+        cik = _valid_cik(match.group("cik"))
+
+        if cik is not None:
+            return cik, _normalized_accession(match.group("accession"))
 
     return None, None
 
@@ -347,7 +364,7 @@ def _cik_and_accession(result):
         return cik, accession
 
     name_match = NAME_CIK_RE.search(str(result.get("name") or ""))
-    cik = name_match.group(1).zfill(10) if name_match else None
+    cik = _valid_cik(name_match.group(1)) if name_match else None
     return cik, None
 
 
@@ -366,9 +383,24 @@ def normalize_form(value):
 
 def _safe_score(value):
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+        score = float(value)
+    except (OverflowError, TypeError, ValueError):
+        score = 0.0
+
+    return score if math.isfinite(score) else 0.0
+
+
+def _finite_number(value):
+    """Return whether a JSON number is finite without accepting booleans."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+
+    return finite
 
 
 def _non_negative_integer(value):
@@ -528,22 +560,12 @@ def _bundle_source_uri(bundle):
     )
 
 
-def summarize_bundles(
-    results,
-    *,
-    limit=MAX_SUMMARIES,
-    offset=0,
-    preview_chars=DEFAULT_PREVIEW_CHARS,
-):
-    """Return bounded model-facing summaries of the best filing bundles."""
-    limit = max(1, min(int(limit), MAX_SUMMARIES))
-    offset = max(0, int(offset))
+def _summaries_from_bundles(bundles, *, preview_chars=DEFAULT_PREVIEW_CHARS):
+    """Return compact model-facing metadata for already-grouped bundles."""
     preview_chars = max(40, min(int(preview_chars), DEFAULT_PREVIEW_CHARS))
     summaries = []
 
-    bundles = group_results(results)
-
-    for bundle in bundles[offset : offset + limit]:
+    for bundle in bundles:
         best = bundle["best"]
         summaries.append(
             {
@@ -563,6 +585,23 @@ def summarize_bundles(
         )
 
     return summaries
+
+
+def summarize_bundles(
+    results,
+    *,
+    limit=MAX_SUMMARIES,
+    offset=0,
+    preview_chars=DEFAULT_PREVIEW_CHARS,
+):
+    """Return bounded model-facing summaries of the best filing bundles."""
+    summaries = _summaries_from_bundles(
+        group_results(results),
+        preview_chars=preview_chars,
+    )
+    limit = max(1, min(int(limit), MAX_SUMMARIES))
+    offset = max(0, int(offset))
+    return summaries[offset : offset + limit]
 
 
 def _batches(values, size=MAX_DOC_UUIDS):
@@ -815,7 +854,7 @@ def _valid_non_negative_integer(value):
 
 def _valid_cik(value):
     text = str(value or "").strip()
-    return text.zfill(10) if CIK_RE.fullmatch(text) else None
+    return text.zfill(10) if CIK_RE.fullmatch(text) and int(text) > 0 else None
 
 
 def _normalized_accession(value):
@@ -953,6 +992,8 @@ def _enumeration_state(payload, expected_forms):
                 "issuer_name": str(row.get("issuer_name") or ""),
                 "tickers": [],
                 "search_ticker": None,
+                "census_tickers": [],
+                "census_search_ticker": None,
                 "accessions": [],
                 "filing_types": [],
                 "filing_dates": [],
@@ -984,6 +1025,10 @@ def _enumeration_state(payload, expected_forms):
 
             if filer["search_ticker"] is None:
                 filer["search_ticker"] = ticker
+
+    for filer in filers.values():
+        filer["census_tickers"] = list(filer["tickers"])
+        filer["census_search_ticker"] = filer["search_ticker"]
 
     alias_owners = {}
 
@@ -1077,9 +1122,34 @@ def _enumeration_state(payload, expected_forms):
         "failed": {},
         "unexpected": [],
         "unexpected_accessions": [],
+        "included_companions": {},
+        "excluded_post_census": {},
+        "census_identity_issues": list(inconsistencies),
         "identity_issues": inconsistencies,
     }
+    state["census_fingerprint"] = _census_fingerprint(state)
     return state
+
+
+def _census_fingerprint(state):
+    """Return a stable fingerprint for the immutable census population and scope."""
+    payload = {
+        "scope": state.get("scope"),
+        "enumeration": state.get("enumeration"),
+        "accessions": state.get("accessions"),
+        "filers": {
+            cik: {
+                "accessions": filer.get("accessions"),
+                "census_tickers": filer.get("census_tickers"),
+                "census_search_ticker": filer.get("census_search_ticker"),
+            }
+            for cik, filer in sorted((state.get("filers") or {}).items())
+        },
+        "census_identity_issues": state.get("census_identity_issues"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _contains_capability_url(value):
@@ -1112,6 +1182,42 @@ def _valid_query_receipt(value):
 
 def _valid_response_id(value):
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _valid_post_census_record(accession, value, *, known_ciks, companion, scope):
+    if (
+        not isinstance(accession, str)
+        or _normalized_accession(accession) != accession
+        or not isinstance(value, dict)
+        or set(value) != {"accession", "cik", "ticker", "filing_type", "filing_date"}
+        or value.get("accession") != accession
+    ):
+        return False
+
+    cik = _valid_cik(value.get("cik"))
+    ticker = value.get("ticker")
+
+    if (
+        cik is None
+        or (companion and cik not in known_ciks)
+        or (not companion and cik in known_ciks)
+    ):
+        return False
+
+    if ticker is not None and _qualified_ticker(ticker) is None:
+        return False
+
+    try:
+        filing_date = datetime.date.fromisoformat(str(value.get("filing_date") or ""))
+        date_from = datetime.date.fromisoformat(scope["date_from"])
+        date_to = datetime.date.fromisoformat(scope["date_to"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    return (
+        date_from <= filing_date <= date_to
+        and bool(" ".join(str(value.get("filing_type") or "").split()))
+    )
 
 
 def _response_id_in_use(state, response_id, *, exclude=None):
@@ -1163,6 +1269,8 @@ def _validate_state(state):
         "consumed_artifacts",
         "individually_checked",
         "failed",
+        "included_companions",
+        "excluded_post_census",
     )
 
     if any(not isinstance(state.get(key), dict) for key in required_objects):
@@ -1172,6 +1280,7 @@ def _validate_state(state):
         "broad_surfaced",
         "unexpected",
         "unexpected_accessions",
+        "census_identity_issues",
         "identity_issues",
     ):
         if not isinstance(state.get(key), list):
@@ -1223,7 +1332,13 @@ def _validate_state(state):
         if normalized_cik != cik or not isinstance(filer, dict) or filer.get("cik") != cik:
             raise HelperError("The coverage state contains a malformed filer identity.")
 
-        for key in ("accessions", "filing_types", "filing_dates", "tickers"):
+        for key in (
+            "accessions",
+            "filing_types",
+            "filing_dates",
+            "tickers",
+            "census_tickers",
+        ):
             if not isinstance(filer.get(key), list):
                 raise HelperError("The coverage state contains a malformed filer record.")
 
@@ -1270,10 +1385,63 @@ def _validate_state(state):
         ):
             raise HelperError("The coverage state contains an invalid selected search ticker.")
 
+        census_tickers = filer["census_tickers"]
+
+        if any(
+            _qualified_ticker(value) is None
+            for value in census_tickers
+        ) or len({value.upper() for value in census_tickers}) != len(census_tickers):
+            raise HelperError("The coverage state contains malformed frozen ticker aliases.")
+
+        if any(
+            value.upper() not in {ticker.upper() for ticker in tickers}
+            for value in census_tickers
+        ):
+            raise HelperError("Frozen ticker aliases must remain present in the filer record.")
+
+        census_search_ticker = filer.get("census_search_ticker")
+
+        if census_search_ticker is not None and (
+            _qualified_ticker(census_search_ticker) is None
+            or census_search_ticker.upper()
+            not in {value.upper() for value in census_tickers}
+        ):
+            raise HelperError("The coverage state contains an invalid frozen search ticker.")
+
     if set(accession_owners) != set(accessions):
         raise HelperError("The coverage state does not assign every accession to one filer.")
 
     known_ciks = set(filers)
+
+    if not _valid_response_id(state.get("census_fingerprint")):
+        raise HelperError("The coverage state is missing its census fingerprint.")
+
+    if state["census_fingerprint"] != _census_fingerprint(state):
+        raise HelperError("The frozen census fingerprint does not match the coverage state.")
+
+    for key, companion in (
+        ("included_companions", True),
+        ("excluded_post_census", False),
+    ):
+        if not all(
+            _valid_post_census_record(
+                accession,
+                value,
+                known_ciks=known_ciks,
+                companion=companion,
+                scope=scope,
+            )
+            for accession, value in state[key].items()
+        ):
+            raise HelperError(f"The coverage state contains malformed {key} records.")
+
+    if set(state["included_companions"]) & set(state["accessions"]):
+        raise HelperError("A frozen-census accession cannot also be a companion accession.")
+
+    if set(state["excluded_post_census"]) & (
+        set(state["accessions"]) | set(state["included_companions"])
+    ):
+        raise HelperError("Post-census accession classes must be mutually exclusive.")
 
     if not all(
         isinstance(value, dict)
@@ -1464,9 +1632,12 @@ def _validate_state(state):
 
     if not all(
         isinstance(value, str) and FAILURE_REASON_RE.fullmatch(value)
-        for value in state["identity_issues"]
+        for value in state["identity_issues"] + state["census_identity_issues"]
     ):
         raise HelperError("The coverage state contains an invalid identity issue code.")
+
+    if any(value not in state["identity_issues"] for value in state["census_identity_issues"]):
+        raise HelperError("Frozen census issues cannot be removed from coverage state.")
 
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
@@ -1495,6 +1666,30 @@ def _load_state(path):
     return _validate_state(state)
 
 
+def reset_searches(state):
+    """Clear search-derived state while preserving the immutable census."""
+    _validate_state(state)
+
+    for filer in state["filers"].values():
+        filer["tickers"] = list(filer["census_tickers"])
+        filer["search_ticker"] = filer["census_search_ticker"]
+
+    state["search_plan"] = None
+    state["broad_searches"] = {}
+    state["broad_failures"] = {}
+    state["consumed_responses"] = {}
+    state["consumed_artifacts"] = {}
+    state["broad_surfaced"] = []
+    state["individually_checked"] = {}
+    state["failed"] = {}
+    state["unexpected"] = []
+    state["unexpected_accessions"] = []
+    state["included_companions"] = {}
+    state["excluded_post_census"] = {}
+    state["identity_issues"] = list(state["census_identity_issues"])
+    return state
+
+
 def _alias_map(state):
     aliases = {}
 
@@ -1506,6 +1701,91 @@ def _alias_map(state):
                 aliases.setdefault(ticker.upper(), set()).add(cik)
 
     return aliases
+
+
+def _post_census_record(result, source_cik, accession):
+    return {
+        "accession": accession,
+        "cik": source_cik,
+        "ticker": _qualified_ticker(result.get("ticker")),
+        "filing_type": " ".join(str(result.get("filing_type") or "").split()),
+        "filing_date": str(result.get("filing_date") or "").strip(),
+    }
+
+
+def _record_companion(state, result, source_cik, accession):
+    state["included_companions"].setdefault(
+        accession,
+        _post_census_record(result, source_cik, accession),
+    )
+
+
+def _record_excluded_post_census(state, result, source_cik, accession):
+    state["excluded_post_census"].setdefault(
+        accession,
+        _post_census_record(result, source_cik, accession),
+    )
+
+
+def _saved_accession_record(state, accession):
+    """Return the frozen, companion, or excluded record for one accession."""
+    for classification, key in (
+        ("census", "accessions"),
+        ("companion", "included_companions"),
+        ("excluded", "excluded_post_census"),
+    ):
+        record = state[key].get(accession)
+
+        if record is not None:
+            return classification, record
+
+    return None, None
+
+
+def _accession_record_matches_result(record, source_cik, result):
+    """Return whether one saved accession identity matches a search result."""
+    if not isinstance(record, dict) or record.get("cik") != source_cik:
+        return False
+
+    saved_form = normalize_form(record.get("filing_type"))[0]
+    result_form = normalize_form(result.get("filing_type"))[0]
+    result_date = str(result.get("filing_date") or "").strip()
+    return record.get("filing_date") == result_date and saved_form == result_form
+
+
+def _eligible_results_for_state(state, results):
+    """Filter model-facing summaries to frozen-census companies only."""
+    aliases = _alias_map(state)
+    eligible = []
+
+    for result in results:
+        _validate_result_window(state, result)
+        source_cik, accession = _sec_cik_and_accession(result)
+        ticker = _qualified_ticker(result.get("ticker"))
+        ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
+
+        if source_cik in state["filers"]:
+            if ticker_ciks and source_cik not in ticker_ciks:
+                continue
+
+            if accession is not None:
+                classification, accession_record = _saved_accession_record(
+                    state,
+                    accession,
+                )
+
+                if classification == "excluded" or not _accession_record_matches_result(
+                    accession_record,
+                    source_cik,
+                    result,
+                ):
+                    continue
+
+            eligible.append(result)
+        elif source_cik is None and len(ticker_ciks) == 1:
+            eligible.append(result)
+
+    return eligible
 
 
 def _validate_result_window(state, result):
@@ -1537,6 +1817,7 @@ def add_broad_search_results(
     response_id=None,
     artifact_id=None,
     attested_empty=False,
+    return_eligible=False,
 ):
     """Record one scope-validated broad-search receipt and its surfaced filers."""
     _validate_state(state)
@@ -1560,8 +1841,8 @@ def add_broad_search_results(
 
     if existing_receipt is not None:
         raise HelperError(
-            "This filing form already has a broad-search receipt. Reinitialize the "
-            "ledger before replacing a recorded search."
+            "This filing form already has a broad-search receipt. Reset searches "
+            "before replacing a recorded search."
         )
 
     plan = _bind_query_plan(state, queries)
@@ -1605,6 +1886,7 @@ def add_broad_search_results(
     previous_surfaced = set(state["broad_surfaced"])
     matched_ciks = set()
     authoritative_ciks = set()
+    eligible_results = []
 
     for result in results:
         _validate_result_window(state, result)
@@ -1619,27 +1901,29 @@ def add_broad_search_results(
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
         matched_cik = None
+        is_companion = False
 
         if source_cik in state["filers"]:
             if accession is not None:
-                accession_record = state["accessions"].get(accession)
+                classification, accession_record = _saved_accession_record(
+                    state,
+                    accession,
+                )
 
-                if accession_record is None:
-                    _append_unique(state["unexpected_accessions"], accession)
-                    _append_unique(
-                        state["identity_issues"],
-                        "unexpected_in_scope_accession",
-                    )
-                    continue
+                if classification is None:
+                    is_companion = True
 
-                if accession_record.get("cik") != source_cik:
+                elif (
+                    classification == "excluded"
+                    or accession_record.get("cik") != source_cik
+                ):
                     _append_unique(state["identity_issues"], "search_identity_conflict")
                     continue
 
-                if (
-                    not accession_record.get("filing_type", "").startswith(expected_form)
-                    or accession_record.get("filing_date")
-                    != str(result.get("filing_date") or "").strip()
+                elif not _accession_record_matches_result(
+                    accession_record,
+                    source_cik,
+                    result,
                 ):
                     _append_unique(
                         state["identity_issues"],
@@ -1659,6 +1943,10 @@ def add_broad_search_results(
                     filer["search_ticker"] = ticker
 
                 aliases.setdefault(ticker.upper(), set()).add(source_cik)
+
+            if is_companion:
+                _record_companion(state, result, source_cik, accession)
+
             matched_cik = source_cik
 
             if accession is not None:
@@ -1666,6 +1954,25 @@ def add_broad_search_results(
 
         elif source_cik and ticker_ciks:
             _append_unique(state["identity_issues"], "search_identity_conflict")
+            continue
+
+        elif source_cik and accession:
+            classification, accession_record = _saved_accession_record(state, accession)
+
+            if classification in {"census", "companion"}:
+                _append_unique(state["identity_issues"], "search_identity_conflict")
+            elif classification == "excluded" and not _accession_record_matches_result(
+                accession_record,
+                source_cik,
+                result,
+            ):
+                _append_unique(
+                    state["identity_issues"],
+                    "search_accession_metadata_mismatch",
+                )
+            elif classification is None:
+                _record_excluded_post_census(state, result, source_cik, accession)
+
             continue
 
         elif len(ticker_ciks) == 1:
@@ -1677,6 +1984,7 @@ def add_broad_search_results(
 
         if matched_cik:
             matched_ciks.add(matched_cik)
+            eligible_results.append(result)
             state["failed"].pop(matched_cik, None)
             state["individually_checked"].pop(matched_cik, None)
         else:
@@ -1712,7 +2020,8 @@ def add_broad_search_results(
             for cik in receipt["surfaced_ciks"]
         }
     )
-    return len(set(state["broad_surfaced"]) - previous_surfaced)
+    added_count = len(set(state["broad_surfaced"]) - previous_surfaced)
+    return (added_count, eligible_results) if return_eligible else added_count
 
 
 def fail_broad_search(state, expected_form, queries, reason):
@@ -1843,24 +2152,80 @@ def bind_resolved_ticker(state, cik_value, ticker_value):
     return cik, ticker
 
 
-def _validate_ticker_search_results(state, cik, results):
+def _filter_ticker_search_results(state, cik, results):
+    """Validate one ticker search and retain only frozen-census-company results."""
     aliases = _alias_map(state)
+    eligible = []
 
     for result in results:
         _validate_result_window(state, result)
-        source_cik, _accession = _sec_cik_and_accession(result)
+        source_cik, accession = _sec_cik_and_accession(result)
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
 
-        if source_cik is not None:
+        if source_cik in state["filers"]:
             if source_cik != cik or (ticker_ciks and cik not in ticker_ciks):
                 raise HelperError(
                     "A ticker-search result belongs to a different filer than --ticker."
                 )
+
+            if accession is not None:
+                classification, accession_record = _saved_accession_record(
+                    state,
+                    accession,
+                )
+
+                if classification is None:
+                    _record_companion(state, result, source_cik, accession)
+                elif (
+                    classification == "excluded"
+                    or accession_record.get("cik") != source_cik
+                ):
+                    raise HelperError(
+                        "A ticker-search accession belongs to a different census filer."
+                    )
+                elif not _accession_record_matches_result(
+                    accession_record,
+                    source_cik,
+                    result,
+                ):
+                    raise HelperError(
+                        "A ticker-search accession has conflicting filing metadata."
+                    )
+
+            eligible.append(result)
+        elif source_cik is not None and accession is not None:
+            if ticker_ciks:
+                raise HelperError(
+                    "A ticker-search result belongs to a different filer than --ticker."
+                )
+
+            classification, accession_record = _saved_accession_record(state, accession)
+
+            if classification in {"census", "companion"}:
+                raise HelperError(
+                    "A ticker-search accession belongs to a different census filer."
+                )
+
+            if classification == "excluded" and not _accession_record_matches_result(
+                accession_record,
+                source_cik,
+                result,
+            ):
+                raise HelperError(
+                    "A ticker-search accession has conflicting filing metadata."
+                )
+
+            if classification is None:
+                _record_excluded_post_census(state, result, source_cik, accession)
         elif cik not in ticker_ciks:
             raise HelperError(
                 "A ticker-search result cannot be tied to the requested enumerated filer."
             )
+        else:
+            eligible.append(result)
+
+    return eligible
 
 
 def mark_filer(
@@ -1876,6 +2241,7 @@ def mark_filer(
     response_id=None,
     artifact_id=None,
     attested_empty=False,
+    return_eligible=False,
 ):
     """Record one saved-response-backed ticker check or one terminal failed attempt."""
     _validate_state(state)
@@ -1945,7 +2311,7 @@ def mark_filer(
         if _artifact_id_in_use(state, artifact_id, exclude=("ticker", cik)):
             raise HelperError("The saved artifact path is already bound to another coverage check.")
 
-        _validate_ticker_search_results(state, cik, results)
+        eligible_results = _filter_ticker_search_results(state, cik, results)
         state["individually_checked"][cik] = {
             **plan,
             "ticker": ticker,
@@ -1977,7 +2343,9 @@ def mark_filer(
         if cik not in state["individually_checked"]:
             state["failed"][cik] = {"ticker": ticker, "reason": reason}
 
-    return cik
+        eligible_results = []
+
+    return (cik, eligible_results) if return_eligible else cik
 
 
 def coverage_audit(state):
@@ -2087,6 +2455,7 @@ def coverage_audit(state):
     complete = not inconsistencies and not unsearchable and not missing and not failed
     output = {
         "complete": complete,
+        "census_fingerprint": state["census_fingerprint"],
         "as_of": enumeration.get("as_of"),
         "selected_forms": scope.get("expected_forms") or [],
         "date_from": scope.get("date_from"),
@@ -2106,12 +2475,223 @@ def coverage_audit(state):
         "unpolled_filer_count": len(missing),
         "unexpected_filer_count": len(state["unexpected"]),
         "unexpected_accession_count": len(state["unexpected_accessions"]),
+        "included_companion_filing_count": len(state["included_companions"]),
+        "excluded_post_start_filing_count": len(state["excluded_post_census"]),
+        "post_start_exclusion_note": (
+            "1 filing was detected after the scan began but is not included here."
+            if len(state["excluded_post_census"]) == 1
+            else (
+                f"{len(state['excluded_post_census'])} filings were detected after the "
+                "scan began but are not included here."
+                if state["excluded_post_census"]
+                else ""
+            )
+        ),
         "request_binding": "agent_attested",
         "warnings": warnings,
         "coverage_issues": enumeration.get("issues") or [],
         "inconsistencies": inconsistencies,
     }
     return output
+
+
+def _summary_index_path(artifact_path):
+    return Path(f"{Path(artifact_path)}{SUMMARY_INDEX_SUFFIX}")
+
+
+def _summary_index_payload(
+    state,
+    response_id,
+    artifact_id,
+    artifact_stat,
+    summaries,
+):
+    return {
+        "schema_version": SUMMARY_INDEX_VERSION,
+        "kind": "filing_search_summary_index",
+        "response_id": response_id,
+        "artifact_id": artifact_id,
+        "artifact_size": artifact_stat.st_size,
+        "artifact_mtime_ns": artifact_stat.st_mtime_ns,
+        "census_fingerprint": state["census_fingerprint"],
+        "bundle_count": len(summaries),
+        "summaries": summaries,
+    }
+
+
+def _write_summary_index(
+    artifact_path,
+    state,
+    response_id,
+    artifact_id,
+    results,
+    *,
+    preview_chars=DEFAULT_PREVIEW_CHARS,
+):
+    """Persist compact eligible metadata next to one immutable search download."""
+    summaries = _summaries_from_bundles(
+        group_results(results),
+        preview_chars=preview_chars,
+    )
+    try:
+        artifact_stat = Path(artifact_path).stat()
+    except OSError as exc:
+        raise HelperError(f"Could not inspect the saved search response: {exc}.") from None
+
+    payload = _summary_index_payload(
+        state,
+        response_id,
+        artifact_id,
+        artifact_stat,
+        summaries,
+    )
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    _write_atomic(_summary_index_path(artifact_path), body)
+    return summaries
+
+
+def _valid_saved_summary(value):
+    required = {
+        "bundle_id",
+        "issuer_key",
+        "ticker",
+        "cik",
+        "identity_conflict",
+        "company",
+        "date",
+        "form",
+        "score",
+        "document_count",
+        "source_uri",
+        "preview",
+    }
+
+    if not isinstance(value, dict) or set(value) != required:
+        return False
+
+    ticker = value["ticker"]
+    cik = value["cik"]
+    source_uri = value["source_uri"]
+    return (
+        isinstance(value["bundle_id"], str)
+        and bool(value["bundle_id"])
+        and isinstance(value["issuer_key"], str)
+        and bool(value["issuer_key"])
+        and (ticker is None or _qualified_ticker(ticker) is not None)
+        and (cik is None or _valid_cik(cik) is not None)
+        and isinstance(value["identity_conflict"], bool)
+        and all(
+            isinstance(value[key], str)
+            for key in ("company", "date", "form", "preview")
+        )
+        and len(value["preview"]) <= DEFAULT_PREVIEW_CHARS
+        and _finite_number(value["score"])
+        and _valid_non_negative_integer(value["document_count"])
+        and isinstance(source_uri, str)
+        and (not source_uri or validate_sec_url(source_uri) == source_uri)
+    )
+
+
+def _load_summary_index(artifact_path, state):
+    """Load a compact index only when it is bound to this artifact and census."""
+    index_path = _summary_index_path(artifact_path)
+
+    if not index_path.exists():
+        return None
+
+    try:
+        payload = _load_json_value(index_path)
+    except HelperError:
+        return None
+    required = {
+        "schema_version",
+        "kind",
+        "response_id",
+        "artifact_id",
+        "artifact_size",
+        "artifact_mtime_ns",
+        "census_fingerprint",
+        "bundle_count",
+        "summaries",
+    }
+
+    if not isinstance(payload, dict) or set(payload) != required:
+        return None
+
+    try:
+        resolved_artifact = Path(artifact_path).resolve(strict=True)
+        response_path = str(resolved_artifact).encode("utf-8")
+        artifact_stat = resolved_artifact.stat()
+    except OSError:
+        return None
+
+    artifact_id = hashlib.sha256(response_path).hexdigest()
+    response_id = payload.get("response_id")
+    owner = state["consumed_artifacts"].get(artifact_id)
+    summaries = payload.get("summaries")
+
+    if (
+        payload.get("schema_version") != SUMMARY_INDEX_VERSION
+        or payload.get("kind") != "filing_search_summary_index"
+        or payload.get("artifact_id") != artifact_id
+        or payload.get("artifact_size") != artifact_stat.st_size
+        or payload.get("artifact_mtime_ns") != artifact_stat.st_mtime_ns
+        or payload.get("census_fingerprint") != state["census_fingerprint"]
+        or not _valid_response_id(response_id)
+        or owner is None
+        or state["consumed_responses"].get(response_id) != owner
+        or not isinstance(summaries, list)
+        or payload.get("bundle_count") != len(summaries)
+        or not all(_valid_saved_summary(summary) for summary in summaries)
+        or _contains_capability_url(payload)
+    ):
+        return None
+
+    return summaries
+
+
+def _summary_page_from_summaries(
+    summaries,
+    *,
+    limit,
+    offset,
+    preview_chars=DEFAULT_PREVIEW_CHARS,
+):
+    limit = max(1, min(int(limit), MAX_SUMMARIES))
+    normalized_offset = max(0, offset)
+    preview_chars = max(40, min(int(preview_chars), DEFAULT_PREVIEW_CHARS))
+    shown = [
+        {**summary, "preview": summary["preview"][:preview_chars]}
+        for summary in summaries[normalized_offset : normalized_offset + limit]
+    ]
+    bundle_count = len(summaries)
+    remaining = max(0, bundle_count - normalized_offset - len(shown))
+    return {
+        "bundle_count": bundle_count,
+        "offset": normalized_offset,
+        "shown_count": len(shown),
+        "remaining_bundle_count": remaining,
+        "truncated": remaining > 0,
+        "shown": shown,
+    }
+
+
+def _summary_page(results, *, limit, offset, preview_chars):
+    summaries = _summaries_from_bundles(
+        group_results(results),
+        preview_chars=DEFAULT_PREVIEW_CHARS,
+    )
+    return _summary_page_from_summaries(
+        summaries,
+        limit=limit,
+        offset=offset,
+        preview_chars=preview_chars,
+    )
 
 
 def _argument_parser():
@@ -2129,6 +2709,11 @@ def _argument_parser():
         help="Read one capability URL from stdin and download it.",
     )
     summarize.add_argument("--save", type=Path)
+    summarize.add_argument(
+        "--state",
+        type=Path,
+        help="Filter summaries to companies in one frozen coverage census.",
+    )
     summarize.add_argument("--limit", type=int, default=MAX_SUMMARIES)
     summarize.add_argument("--offset", type=int, default=0)
     summarize.add_argument(
@@ -2159,14 +2744,22 @@ def _argument_parser():
     coverage_init.add_argument(
         "--save",
         type=Path,
-        help="Save the fetched census so the ledger can be reset without re-enumerating.",
+        help="Save the fetched immutable census for this scan.",
     )
+
+    coverage_reset = subparsers.add_parser("coverage-reset-searches")
+    coverage_reset.add_argument("--state", type=Path, required=True)
 
     coverage_add_search = subparsers.add_parser("coverage-add-search")
     coverage_add_search.add_argument("--state", type=Path, required=True)
     coverage_add_search.add_argument("--expected-form", required=True)
     broad_source = coverage_add_search.add_mutually_exclusive_group(required=True)
     broad_source.add_argument("--artifact", type=Path)
+    broad_source.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Fetch, save, validate, and record one search capability in one operation.",
+    )
     broad_source.add_argument(
         "--empty",
         action="store_true",
@@ -2178,7 +2771,13 @@ def _argument_parser():
         help="Record a terminal form-scoped search failure after bounded retries.",
     )
     coverage_add_search.add_argument("--reason")
+    coverage_add_search.add_argument("--save", type=Path)
     coverage_add_search.add_argument("--query", action="append", required=True)
+    coverage_add_search.add_argument("--limit", type=int, default=MAX_SUMMARIES)
+    coverage_add_search.add_argument("--offset", type=int, default=0)
+    coverage_add_search.add_argument(
+        "--preview-chars", type=int, default=DEFAULT_PREVIEW_CHARS
+    )
 
     coverage_missing = subparsers.add_parser("coverage-missing")
     coverage_missing.add_argument("--state", type=Path, required=True)
@@ -2197,13 +2796,25 @@ def _argument_parser():
     coverage_identity.add_argument("--cik")
     coverage_mark.add_argument("--status", choices=("checked", "failed"), required=True)
     coverage_mark.add_argument("--reason")
-    coverage_mark.add_argument("--artifact", type=Path)
-    coverage_mark.add_argument(
+    ticker_source = coverage_mark.add_mutually_exclusive_group()
+    ticker_source.add_argument("--artifact", type=Path)
+    ticker_source.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Fetch, save, validate, and record one ticker search in one operation.",
+    )
+    ticker_source.add_argument(
         "--empty",
         action="store_true",
         help="Attest that the just-completed scoped ticker search returned count=0.",
     )
+    coverage_mark.add_argument("--save", type=Path)
     coverage_mark.add_argument("--query", action="append")
+    coverage_mark.add_argument("--limit", type=int, default=MAX_SUMMARIES)
+    coverage_mark.add_argument("--offset", type=int, default=0)
+    coverage_mark.add_argument(
+        "--preview-chars", type=int, default=DEFAULT_PREVIEW_CHARS
+    )
 
     coverage_audit_parser = subparsers.add_parser("coverage-audit")
     coverage_audit_parser.add_argument("--state", type=Path, required=True)
@@ -2233,24 +2844,50 @@ def main(argv=None):
             elif arguments.save is not None:
                 raise HelperError("--save is accepted only with --fetch.")
 
-            results = load_artifact(artifact_path)
-            bundle_count = len(group_results(results))
-            shown = summarize_bundles(
-                results,
-                limit=arguments.limit,
-                offset=arguments.offset,
-                preview_chars=arguments.preview_chars,
-            )
-            normalized_offset = max(0, arguments.offset)
-            remaining = max(0, bundle_count - normalized_offset - len(shown))
-            output = {
-                "bundle_count": bundle_count,
-                "offset": normalized_offset,
-                "shown_count": len(shown),
-                "remaining_bundle_count": remaining,
-                "truncated": remaining > 0,
-                "shown": shown,
-            }
+            summaries = None
+
+            if arguments.state is not None:
+                state = _load_state(arguments.state)
+                summaries = _load_summary_index(artifact_path, state)
+
+            if summaries is None:
+                if arguments.state is not None:
+                    (
+                        results,
+                        _result_count,
+                        response_id,
+                        artifact_id,
+                    ) = load_search_response(artifact_path)
+                    owner = state["consumed_artifacts"].get(artifact_id)
+
+                    if (
+                        owner is None
+                        or state["consumed_responses"].get(response_id) != owner
+                    ):
+                        raise HelperError(
+                            "The saved search artifact is not bound to an active "
+                            "coverage receipt."
+                        )
+
+                    results = _eligible_results_for_state(state, results)
+                else:
+                    results = load_artifact(artifact_path)
+
+                output = _summary_page(
+                    results,
+                    limit=arguments.limit,
+                    offset=arguments.offset,
+                    preview_chars=arguments.preview_chars,
+                )
+            else:
+                output = _summary_page_from_summaries(
+                    summaries,
+                    limit=arguments.limit,
+                    offset=arguments.offset,
+                    preview_chars=arguments.preview_chars,
+                )
+
+            output["summary_index_used"] = summaries is not None
         elif arguments.command == "select":
             results = load_artifact(arguments.artifact)
             output = {
@@ -2262,6 +2899,11 @@ def main(argv=None):
             }
 
         elif arguments.command == "coverage-init":
+            if arguments.state.exists():
+                raise HelperError(
+                    "The coverage state already exists; one scan can initialize its census only once."
+                )
+
             expected_forms = _normalized_expected_forms(arguments.expected_form)
 
             if arguments.fetch:
@@ -2299,6 +2941,7 @@ def main(argv=None):
             _write_state(arguments.state, state)
             output = {
                 "enumeration_complete": state["enumeration"]["coverage_complete"],
+                "census_fingerprint": state["census_fingerprint"],
                 "as_of": state["enumeration"]["as_of"],
                 "date_from": state["scope"]["date_from"],
                 "date_to": state["scope"]["date_to"],
@@ -2311,8 +2954,41 @@ def main(argv=None):
                 "inconsistencies": state["identity_issues"],
             }
 
+        elif arguments.command == "coverage-reset-searches":
+            state = _load_state(arguments.state)
+            fingerprint = state["census_fingerprint"]
+            reset_searches(state)
+            _write_state(arguments.state, state)
+            output = {
+                "status": "searches_reset",
+                "census_fingerprint": fingerprint,
+                "as_of": state["enumeration"]["as_of"],
+                "selected_forms": state["scope"]["expected_forms"],
+                "accession_count": len(state["accessions"]),
+                "filer_count": len(state["filers"]),
+                "missing_filer_count": len(_missing_ciks(state)),
+                "coverage_issues": state["enumeration"]["issues"],
+            }
+
         elif arguments.command == "coverage-add-search":
             state = _load_state(arguments.state)
+            eligible_results = []
+            summaries = []
+            summary_index_available = False
+
+            if arguments.fetch:
+                if arguments.save is None:
+                    raise HelperError("--save is required with coverage-add-search --fetch.")
+                if arguments.save.resolve() == arguments.state.resolve():
+                    raise HelperError("--save and --state must use different paths.")
+                url = sys.stdin.read().strip()
+                body = fetch_artifact_bytes(url)
+                _write_atomic(arguments.save, body)
+                artifact_path = arguments.save
+            else:
+                if arguments.save is not None:
+                    raise HelperError("--save is accepted only with --fetch.")
+                artifact_path = arguments.artifact
 
             if arguments.failed:
                 if arguments.reason is None:
@@ -2338,11 +3014,11 @@ def main(argv=None):
                     raise HelperError("--reason is accepted only with --failed.")
 
                 results, result_count, response_id, artifact_id = load_search_response(
-                    arguments.artifact
+                    artifact_path
                 )
 
             if not arguments.failed:
-                added_count = add_broad_search_results(
+                added_count, eligible_results = add_broad_search_results(
                     state,
                     results,
                     arguments.expected_form,
@@ -2351,8 +3027,19 @@ def main(argv=None):
                     response_id=response_id,
                     artifact_id=artifact_id,
                     attested_empty=arguments.empty,
+                    return_eligible=True,
                 )
                 recorded_form = _normalized_form(arguments.expected_form)
+
+                if artifact_path is not None:
+                    summaries = _write_summary_index(
+                        artifact_path,
+                        state,
+                        response_id,
+                        artifact_id,
+                        eligible_results,
+                    )
+                    summary_index_available = True
 
             _write_state(arguments.state, state)
             output = {
@@ -2364,7 +3051,16 @@ def main(argv=None):
                 "broad_search_filer_count": len(state["broad_surfaced"]),
                 "missing_filer_count": len(_missing_ciks(state)),
                 "unexpected_filer_count": len(state["unexpected"]),
+                "included_companion_filing_count": len(state["included_companions"]),
+                "excluded_post_start_filing_count": len(state["excluded_post_census"]),
                 "identity_issues": state["identity_issues"],
+                "summary_index_available": summary_index_available,
+                **_summary_page_from_summaries(
+                    summaries,
+                    limit=arguments.limit,
+                    offset=arguments.offset,
+                    preview_chars=arguments.preview_chars,
+                ),
             }
 
         elif arguments.command == "coverage-missing":
@@ -2392,21 +3088,34 @@ def main(argv=None):
 
         elif arguments.command == "coverage-mark":
             state = _load_state(arguments.state)
+            eligible_results = []
+            summaries = []
+            summary_index_available = False
+            artifact_path = None
 
             if arguments.status == "checked":
                 if arguments.reason is not None:
                     raise HelperError("--reason is accepted only when --status failed.")
 
-                if arguments.artifact is not None and arguments.empty:
+                if not (arguments.artifact is not None or arguments.fetch or arguments.empty):
                     raise HelperError(
-                        "Use exactly one of --artifact or --empty when --status checked."
+                        "Use --artifact or --fetch for non-empty results, or --empty for "
+                        "count=0 when --status checked."
                     )
 
-                if arguments.artifact is None and not arguments.empty:
-                    raise HelperError(
-                        "Use --artifact for non-empty results or --empty for count=0 when "
-                        "--status checked."
-                    )
+                if arguments.fetch:
+                    if arguments.save is None:
+                        raise HelperError("--save is required with coverage-mark --fetch.")
+                    if arguments.save.resolve() == arguments.state.resolve():
+                        raise HelperError("--save and --state must use different paths.")
+                    url = sys.stdin.read().strip()
+                    body = fetch_artifact_bytes(url)
+                    _write_atomic(arguments.save, body)
+                    artifact_path = arguments.save
+                else:
+                    if arguments.save is not None:
+                        raise HelperError("--save is accepted only with --fetch.")
+                    artifact_path = arguments.artifact
 
                 if arguments.empty:
                     results = []
@@ -2415,16 +3124,18 @@ def main(argv=None):
                     artifact_id = None
                 else:
                     results, result_count, response_id, artifact_id = load_search_response(
-                        arguments.artifact
+                        artifact_path
                     )
             else:
                 if (
                     arguments.artifact is not None
+                    or arguments.fetch
                     or arguments.empty
+                    or arguments.save is not None
                     or arguments.query is not None
                 ):
                     raise HelperError(
-                        "--artifact, --empty, and --query are accepted only when "
+                        "Search sources, --save, and --query are accepted only when "
                         "--status checked."
                     )
 
@@ -2433,7 +3144,7 @@ def main(argv=None):
                 response_id = None
                 artifact_id = None
 
-            cik = mark_filer(
+            cik, eligible_results = mark_filer(
                 state,
                 arguments.ticker,
                 arguments.status,
@@ -2445,7 +3156,19 @@ def main(argv=None):
                 response_id=response_id,
                 artifact_id=artifact_id,
                 attested_empty=arguments.empty,
+                return_eligible=True,
             )
+
+            if arguments.status == "checked" and artifact_path is not None:
+                summaries = _write_summary_index(
+                    artifact_path,
+                    state,
+                    response_id,
+                    artifact_id,
+                    eligible_results,
+                )
+                summary_index_available = True
+
             _write_state(arguments.state, state)
             output = {
                 "cik": cik,
@@ -2457,6 +3180,15 @@ def main(argv=None):
                 ),
                 "missing_filer_count": len(_missing_ciks(state)),
                 "failed_filer_count": len(state["failed"]),
+                "included_companion_filing_count": len(state["included_companions"]),
+                "excluded_post_start_filing_count": len(state["excluded_post_census"]),
+                "summary_index_available": summary_index_available,
+                **_summary_page_from_summaries(
+                    summaries,
+                    limit=arguments.limit,
+                    offset=arguments.offset,
+                    preview_chars=arguments.preview_chars,
+                ),
             }
 
         else:

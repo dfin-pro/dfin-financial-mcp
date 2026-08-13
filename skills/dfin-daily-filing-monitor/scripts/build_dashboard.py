@@ -52,7 +52,6 @@ STOCK_CACHE_KEYS = {
     "company_name",
     "ticker",
     "cik",
-    "fy_end",
     "sector",
     "industry",
     "subindustry",
@@ -74,6 +73,7 @@ STOCK_CACHE_KEYS = {
     "vh",
     "eps",
 }
+STOCK_CONTEXT_BATCH_LIMIT = 10
 
 
 class HelperError(Exception):
@@ -145,7 +145,11 @@ def _canonical_ticker(value):
 
 def _canonical_cik(value):
     text = str(value or "").strip()
-    return text.lstrip("0").zfill(10) if text.isdigit() else ""
+    return (
+        text.zfill(10)
+        if re.fullmatch(r"[0-9]{1,10}", text) and int(text) > 0
+        else ""
+    )
 
 
 def _retry_delay(response, body):
@@ -414,6 +418,7 @@ def _stock_batch_results(payload):
         or isinstance(error_count, bool)
         or count != len(results)
         or success_count + error_count != count
+        or not 1 <= count <= STOCK_CONTEXT_BATCH_LIMIT
     ):
         raise HelperError("The stock-context artifact does not contain ticker-keyed results.")
 
@@ -446,6 +451,63 @@ def _stock_batch_results(payload):
     return validated
 
 
+def _stock_sources(manifest):
+    """Return one normalized stock-context source mode and its batches."""
+    candidates = {
+        key: manifest.get(key)
+        for key in (
+            "stock_context_url",
+            "stock_context_urls",
+            "stock_context",
+            "stock_context_batches",
+        )
+        if manifest.get(key) is not None
+    }
+
+    if len(candidates) > 1:
+        raise HelperError(
+            "Provide exactly one of stock_context_urls, stock_context_batches, "
+            "stock_context_url, or stock_context."
+        )
+
+    if not candidates:
+        return None, []
+
+    key, value = next(iter(candidates.items()))
+
+    if key == "stock_context_url":
+        return "api", [value]
+
+    if key == "stock_context":
+        return "inline", [value]
+
+    if not isinstance(value, list) or not value:
+        raise HelperError(f"{key} must be a non-empty list.")
+
+    if key == "stock_context_urls":
+        if not all(isinstance(url, str) and url for url in value):
+            raise HelperError("stock_context_urls must contain non-empty URL strings.")
+        if len(set(value)) != len(value):
+            raise HelperError("stock_context_urls must not repeat a single-use URL.")
+        return "api", value
+
+    if not all(isinstance(batch, dict) for batch in value):
+        raise HelperError("stock_context_batches must contain complete response objects.")
+    return "inline", value
+
+
+def _merge_stock_results(target, incoming):
+    overlap = sorted(set(target).intersection(incoming))
+
+    if overlap:
+        raise HelperError(
+            "Stock-context batches repeat ticker results: "
+            f"{', '.join(overlap)}."
+        )
+
+    target.update(incoming)
+
+
 def _number(value):
     """Parse one formatted numeric value without treating missing data as zero."""
     if isinstance(value, bool):
@@ -468,6 +530,9 @@ def _number(value):
     try:
         number = float(cleaned)
     except ValueError:
+        return None
+
+    if not math.isfinite(number):
         return None
 
     return -number if negative else number
@@ -729,7 +794,12 @@ def _normalized_companies(companies):
 
         ticker = str(company.get("ticker") or company.get("t") or "").strip()
         canonical_ticker = _canonical_ticker(ticker)
-        cik = _canonical_cik(company.get("cik"))
+        supplied_cik = company.get("cik")
+        cik = _canonical_cik(supplied_cik)
+
+        if supplied_cik is not None and str(supplied_cik).strip() and not cik:
+            raise HelperError("The dashboard manifest contains a malformed company CIK.")
+
         filings, invalid_filings = _safe_filings(
             company.get("filings") or company.get("fs")
         )
@@ -922,9 +992,12 @@ def extract_stock_fields(payload):
     high = _number(price.get("high_52_week"))
     volume = _number(price.get("volume"))
     average_volume = _number(price.get("average_volume_52_week"))
+    display_volume = volume if volume is not None and volume > 0 else None
     volume_ratio = (
-        volume / average_volume
-        if volume is not None and average_volume not in (None, 0)
+        display_volume / average_volume
+        if display_volume is not None
+        and average_volume is not None
+        and average_volume > 0
         else None
     )
     change_percent = _return_value(price.get("change_percent"))
@@ -982,7 +1055,6 @@ def extract_stock_fields(payload):
         "company_name": str(payload.get("company_name") or ""),
         "ticker": str(payload.get("ticker") or ""),
         "cik": str(profile.get("cik") or ""),
-        "fy_end": str(profile.get("fiscal_year_end") or ""),
         "sector": str(profile.get("gics_sector") or ""),
         "industry": str(profile.get("gics_industry") or ""),
         "subindustry": str(profile.get("gics_subindustry") or ""),
@@ -1018,7 +1090,7 @@ def extract_stock_fields(payload):
         "cur": current,
         "rb": range_badge,
         "rc": range_class,
-        "v": _format_compact(volume),
+        "v": _format_compact(display_volume),
         "vr": f"{volume_ratio:.2f}×" if volume_ratio is not None else None,
         "vh": volume_ratio > 1.5 if volume_ratio is not None else False,
         "eps": eps,
@@ -1026,7 +1098,7 @@ def extract_stock_fields(payload):
     return result
 
 
-def _ratio_fields(ratios, fiscal_year_end):
+def _ratio_fields(ratios):
     if not isinstance(ratios, dict):
         ratios = {}
 
@@ -1041,9 +1113,6 @@ def _ratio_fields(ratios, fiscal_year_end):
 
     if isinstance(year, int):
         output["rvintage"] = f"FY{year}"
-
-        if fiscal_year_end:
-            output["rvintage"] += f" · {fiscal_year_end} year-end"
     else:
         output["rvintage"] = ""
 
@@ -1152,43 +1221,51 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
             invalid_cached_tickers.add(ticker)
 
     uncached_tickers = requested_tickers.difference(sanitized_provided_cache)
-    stock_url = manifest.get("stock_context_url")
-    inline_stock_context = manifest.get("stock_context")
+    stock_source_mode, stock_sources = _stock_sources(manifest)
     fresh_results = {}
     batch_status = "not_requested"
 
-    if stock_url and inline_stock_context is not None:
-        raise HelperError(
-            "Provide either stock_context_url or stock_context, not both."
-        )
-
     if uncached_tickers:
-        if stock_url:
-            try:
-                batch_payload = stock_fetcher(stock_url)
-                fresh_results = _stock_batch_results(batch_payload)
-                batch_status = "ok"
-                del batch_payload
-            except ArtifactRefreshRequired:
-                batch_status = "refresh_required"
-        elif inline_stock_context is not None:
-            if (
-                not isinstance(inline_stock_context, dict)
-                or inline_stock_context.get("format") != "inline"
-            ):
-                raise HelperError(
-                    "Inline stock context must be the complete response object "
-                    "with format set to inline."
-                )
-            fresh_results = _stock_batch_results(inline_stock_context)
+        if stock_source_mode == "api":
             batch_status = "ok"
+
+            for stock_url in stock_sources:
+                try:
+                    batch_payload = stock_fetcher(stock_url)
+                    batch_results = _stock_batch_results(batch_payload)
+                    del batch_payload
+                except ArtifactRefreshRequired:
+                    batch_status = "refresh_required"
+                    continue
+
+                _merge_stock_results(fresh_results, batch_results)
+        elif stock_source_mode == "inline":
+            for inline_stock_context in stock_sources:
+                if inline_stock_context.get("format") != "inline":
+                    raise HelperError(
+                        "Inline stock context must contain complete response objects "
+                        "with format set to inline."
+                    )
+                _merge_stock_results(
+                    fresh_results,
+                    _stock_batch_results(inline_stock_context),
+                )
+            batch_status = "ok"
+
+    unexpected_tickers = sorted(set(fresh_results).difference(uncached_tickers))
+
+    if unexpected_tickers:
+        raise HelperError(
+            "The stock-context batches contain unrequested ticker results: "
+            f"{', '.join(unexpected_tickers)}."
+        )
 
     if batch_status == "ok":
         missing_tickers = sorted(uncached_tickers.difference(fresh_results))
 
         if missing_tickers:
             raise HelperError(
-                "The stock-context batch is missing requested ticker results: "
+                "The stock-context batches are missing requested ticker results: "
                 f"{', '.join(missing_tickers)}."
             )
     elif invalid_cached_tickers and batch_status == "not_requested":
@@ -1246,7 +1323,6 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
         elif batch_status == "ok":
             stock_status = "unavailable"
 
-        fiscal_year_end = stock.get("fy_end", "")
         ratios = company.get("ratios")
         if stock_status == "unresolved":
             usable_ratios = None
@@ -1260,10 +1336,7 @@ def build_data(manifest, *, stock_fetcher=fetch_stock_context, stock_cache=None)
         else:
             usable_ratios = None
 
-        ratio_fields = _ratio_fields(
-            usable_ratios,
-            fiscal_year_end,
-        )
+        ratio_fields = _ratio_fields(usable_ratios)
         exchange = str(company.get("exchange") or "")
         sector = stock.get("subindustry") or stock.get("sector") or ""
         subtitle = " · ".join(value for value in (exchange, sector) if value)
