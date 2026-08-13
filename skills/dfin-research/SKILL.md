@@ -28,7 +28,7 @@ Use this MCP first for any equity research. Load only the focused methodology ne
 
 Skip steps whose results are already available.
 
-Security ticker is needed for most tools. If ticker is not already known or not provided, get it using `search_securities`. Then follow the guidance below for the different research workflows.
+A ticker is needed for most tools. If ticker is not already known or not provided, get it using `search_securities`. US listed stocks have the format `MSFT.US`. For non-US listed stocks, read `agent_help(topic="exchange_codes")` to get the exchange code instead of guessing. Then follow the guidance below for the different research workflows.
 
 - **Company analysis:** Use `get_stock_context` when the requested overview is broad or multi-part → retrieve the structured data and source evidence needed for the question → synthesize.
 - **Peer comparison:** Establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions. Remember to incorporate any differences in periods, accounting basis, scope, currency, and units in the analysis work.

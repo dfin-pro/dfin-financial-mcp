@@ -1,7 +1,7 @@
 ---
 name: dfin-note
 description: >-
-  Create durable private dfin.pro notes from completed financial research or material news and article content. Use when the user asks to save, capture, add, or create a dfin.pro note from analytical work, thesis development, peer or company comparisons, filings, transcripts, reports, prior notes, news articles, announcements, or current events. Route the note to the research or news category, preserve meaningful insights and sources, and compare relevant existing user notes and DFin reports.
+  Create durable private dfin.pro notes from completed financial research or material news and article content. Use when the user asks to save, capture, add, or create a note from analytical work, thesis development, peer or company comparisons, filings, transcripts, reports, prior notes, news articles, announcements, or current events.
 ---
 
 # dfin.pro Note
@@ -30,7 +30,6 @@ Read [references/news.md](references/news.md) for every news note and whenever o
     - Keep the default API delivery for `search_notes` and follow the notes methodology for artifact handling and its policy-only inline fallback. Use inline delivery **only if access to www.dfin.pro api is blocked**.
     - Use `find_linked_notes` when a known note, ticker, report, transcript, or permanent document UUID may expose relevant connections. Omit the query for structural proximity; reuse or refine the research query when relevance ordering is more useful.
     - Keep graph exploration bounded: start from the strongest seed, then re-seed at most twice when a result opens a distinct branch relevant to the saved conclusion. Prefer `max_hops=1` for follow-ups and stop sooner if no materially new candidates appear. Do not recursively expand results or exhaust pagination unless the user requests broader research.
-    - Deduplicate overlapping discoveries by `note_id`.
     - Use `get_note` when complete content is needed to compare a candidate or decide whether to link it.
 4. Draft a concise, distinctive subject and self-standing Markdown body using only the mode elements that materially improve the note. Do not put company names or tickers in the subject.
 5. Compare the draft with relevant existing user notes and DFin reports. Point out material support, contradiction, or potentially stale prior research to the user. If a contradiction would change the saved conclusion or intended relationships, ask the user to resolve it before creation. Otherwise, include the material comparison in the note and proceed.
