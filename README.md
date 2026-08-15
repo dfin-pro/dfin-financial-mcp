@@ -30,16 +30,9 @@ For the installation and connection steps, follow the example for your tool or A
 
 ## Documentation
 
-Use the public website for setup and REST reference material. After connecting, load agent guidance through `agent_help`:
+Use the public website for setup and REST reference material.
 
-- [Documentation map](https://www.dfin.pro/docs.md) - the complete documentation index
-- [MCP setup](https://www.dfin.pro/docs/mcp/) - connection and authentication for supported clients
-- `agent_help(topic="agent_guide")` - the required first read for tool selection and methodology routing
-- `agent_help(topic="methodology_search")` - search, provenance, and document handling
-- `agent_help(topic="methodology_financials")` - structured statements, ratios, sourcing, and verification
-- `agent_help(topic="methodology_screening")` - contract discovery and safe screener construction
-- `agent_help(topic="methodology_notes")` - private-note selection, privacy, linking, and ownership
-- [REST API reference](https://www.dfin.pro/docs/api/v1.md) - detailed lower-level request and response contracts
+- [Documentation map](https://www.dfin.pro/docs/) - the complete documentation index
 
 ## Links
 

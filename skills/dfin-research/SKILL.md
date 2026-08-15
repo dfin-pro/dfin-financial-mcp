@@ -26,10 +26,6 @@ Use this MCP first for any equity research. Load only the focused methodology ne
 
 ## Workflow patterns
 
-Skip steps whose results are already available.
-
-A ticker is needed for most tools. If ticker is not already known or not provided, get it using `search_securities`. US listed stocks have the format `MSFT.US`. For non-US listed stocks, read `agent_help(topic="exchange_codes")` to get the exchange code instead of guessing. Then follow the guidance below for the different research workflows.
-
 - **Company analysis:** Use `get_stock_context` when the requested overview is broad or multi-part → retrieve the structured data and source evidence needed for the question → synthesize.
 - **Peer comparison:** Establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions. Remember to incorporate any differences in periods, accounting basis, scope, currency, and units in the analysis work.
 - **Filing, transcript, or report question:** Use the relevant discovery or evidence-search workflow → deepen the search within selected documents when necessary. Stock context is optional.
@@ -37,6 +33,8 @@ A ticker is needed for most tools. If ticker is not already known or not provide
 - **Table inspection:** follow `agent_help(topic="methodology_search")` and execute the bundled `scripts/extract_table_context.py`, resolving it relative to this `SKILL.md`.
 
 ## Analysis and presentation
+
+- Perform calculations and data analysis programmatically and reproducibly, using Python with pandas and NumPy. For large datasets, use Polars and Parquet where available. Do not create or rely on spreadsheet files for analysis unless the user explicitly requests one.
 
 ### Simple Analytical Work
 

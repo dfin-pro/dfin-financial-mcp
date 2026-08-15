@@ -31,11 +31,13 @@ Read [references/news.md](references/news.md) for every news note and whenever o
     - Use `find_linked_notes` when a known note, ticker, report, transcript, or permanent document UUID may expose relevant connections. Omit the query for structural proximity; reuse or refine the research query when relevance ordering is more useful.
     - Keep graph exploration bounded: start from the strongest seed, then re-seed at most twice when a result opens a distinct branch relevant to the saved conclusion. Prefer `max_hops=1` for follow-ups and stop sooner if no materially new candidates appear. Do not recursively expand results or exhaust pagination unless the user requests broader research.
     - Use `get_note` when complete content is needed to compare a candidate or decide whether to link it.
-4. Draft a concise, distinctive subject and self-standing Markdown body using only the mode elements that materially improve the note. Do not put company names or tickers in the subject.
-5. Compare the draft with relevant existing user notes and DFin reports. Point out material support, contradiction, or potentially stale prior research to the user. If a contradiction would change the saved conclusion or intended relationships, ask the user to resolve it before creation. Otherwise, include the material comparison in the note and proceed.
-6. Before saving, present the proposed note to the user. Summarize its key points, separately identify every new inference or conclusion, and call out material assumptions, uncertainties, and unsupported or contested claims. Ask the user to confirm that the draft, including its conclusions, is correct or to provide revisions. Do not call `create_note` until the user gives clear approval.
-7. Call `create_note` with the user-confirmed category, subject and body, all material tickers, and only note, report, transcript, or raw-document relationships materially relevant to the saved conclusion.
-8. Report the created note's `note_id`, category, subject, linked tickers, and any omitted or uncertain references. Present `url` as the direct link for opening the formatted note.
+4. Read `agent_help(topic="output_guidelines")` once before drafting, if not already read.
+5. Draft a concise and distinctive subject and self-standing Markdown body. Include only the content elements that materially improve the note. Do not put company names or tickers in the subject.
+6. Preserve the user's insights, conclusions, and pattern recognition as the substance of the note. Do not silently rewrite, dilute, or substitute the user's conclusions with the agent's own view. The notebook is a record of the user's thinking; the agent supports it rather than authoring it.
+7. Compare the draft with relevant existing user notes and DFin reports. Tell the user about material support, discrepancies, contradictions, or potentially stale research. Supporting facts and source links may be incorporated as context when they do not change the user's conclusion. Do not add an agent-generated conclusion, caveat, or interpretive comparison to the note unless it is clearly identified and the user approves its inclusion. If a contradiction would change the saved conclusion or intended relationships, ask the user to resolve it before creation.
+8. Before saving, present the proposed note to the user. Summarize its key points; separately identify any agent-added analysis, inference, caveat, or conclusion; and call out material assumptions, uncertainties, and unsupported or contested claims. Ask the user to confirm that the draft, including every agent-added element, is correct or to provide revisions. Do not call `create_note` until the user gives clear approval.
+9. Call `create_note` with the user-confirmed category, subject and body, all material tickers, and only note, report, transcript, or raw-document relationships materially relevant to the saved conclusion.
+10. Report the created note's `note_id`, category, subject, linked tickers, and any omitted or uncertain references. Present the result as a Markdown link in the form `[subject](url)`, using the returned `url` to open the formatted note.
 
 ## Reference Placement
 
@@ -53,7 +55,3 @@ Read [references/news.md](references/news.md) for every news note and whenever o
 - Prefer typed report and transcript relationships and do not duplicate them as raw document references. Never save a temporary `temp_` document UUID or derive an identifier from a URL. Follow the notes methodology for chunk provenance and later revalidation.
 - Put materially affected exchange-qualified tickers in `tickers`.
 - Explain each relationship's relevance through its natural body link. Do not recurse through sources used to build a DFin report.
-
-## Quality Bar
-
-- Read `agent_help(topic="output_guidelines")` once before drafting, if not already read
