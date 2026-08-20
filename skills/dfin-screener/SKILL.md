@@ -5,7 +5,7 @@ description: Build and run dfin.pro stock screens. Use when the user wants to fi
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.7, updated 2026-08-08.
+DFin skill version: 0.1.8, updated 2026-08-20.
 
 ## Screener workflow
 
@@ -15,9 +15,8 @@ Read the screener methodology before building screens. Examples show patterns; t
 2. Call `get_screener_options(mode="basic", detail="index")` to discover canonical filters without loading full definitions.
 3. If the needed key is absent, or the task needs growth, historical metric rules, CAGR/multiple rules, composite metrics, volatility rule groups, or broader public filters, call `get_screener_options(mode="all", detail="index")`.
 4. Call `get_screener_options(mode=..., detail="full", filter_keys=[...])` with only the exact filters needed. Request no more than 20 unique keys per call.
-5. Read https://www.dfin.pro/docs/examples/screener-starter-screens.md only when a starter pattern is useful. Read https://www.dfin.pro/docs/examples/advanced-growth-filters.md before building growth, historical, CAGR, multiple, or multi-year filters. Treat both as shapes and validate every key and value against the focused live contract.
-6. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned contract. Execute with `run_screener(..., delivery="api")`; do not use legacy screener runner names.
-7. Use `result_format="tickers"` for a candidate list and `result_format="rows"` only when returned fields are needed. The API artifact contains the exact requested page and a compact preview; fetch later pages explicitly only when the task requires them.
+6. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned contract. Execute with `run_screener(..., delivery="api")`.
+7. Search results return a `web_browser_access_url` is a separate 60-minute browser handoff link for the user. Provide a hyperlink to the user so they can pick up this screen in the browser for further investigation, if needed. 
 
 Use `delivery="inline"` only for a deliberately bounded page when artifact access is unavailable. Never silently relax filters, convert missing values to zero, or imply that a preview or single page is the complete match set. Treat results as candidates and verify selected securities before making investment claims.
 
