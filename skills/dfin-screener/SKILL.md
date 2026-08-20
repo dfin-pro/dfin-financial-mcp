@@ -16,7 +16,7 @@ Read the screener methodology before building screens. Examples show patterns; t
 3. If the needed key is absent, or the task needs growth, historical metric rules, CAGR/multiple rules, composite metrics, volatility rule groups, or broader public filters, call `get_screener_options(mode="all", detail="index")`.
 4. Call `get_screener_options(mode=..., detail="full", filter_keys=[...])` with only the exact filters needed. Request no more than 20 unique keys per call.
 6. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned contract. Execute with `run_screener(..., delivery="api")`.
-7. Search results return a `web_browser_access_url` is a separate 60-minute browser handoff link for the user. Provide a hyperlink to the user so they can pick up this screen in the browser for further investigation, if needed. 
+7. Search results also return a `web_browser_access_url`, a separate 60-minute browser handoff link for the user. Provide a hyperlink (for example, `[Open this screen](...)`) to the user so they can pick up this screen in the browser for further investigation, if needed. 
 
 Use `delivery="inline"` only for a deliberately bounded page when artifact access is unavailable. Never silently relax filters, convert missing values to zero, or imply that a preview or single page is the complete match set. Treat results as candidates and verify selected securities before making investment claims.
 
