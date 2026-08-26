@@ -52,6 +52,12 @@ ALLOWED_FAILURE_REASONS = frozenset(
         "rate_limited",
         "timeout",
         "unresolved_ticker",
+        "coverage_unknown",
+        "internal_document_unavailable",
+        "internal_search_unavailable",
+        "sec_timeout",
+        "sec_rate_limited",
+        "sec_unavailable",
     }
 )
 BROAD_FAILURE_REASONS = ALLOWED_FAILURE_REASONS - {"unresolved_ticker"}
@@ -1161,6 +1167,8 @@ def _enumeration_state(payload, expected_forms):
         "individually_checked": {},
         "joint_satisfied": {},
         "failed": {},
+        "server_checked": {},
+        "server_scan": None,
         "unexpected": [],
         "unexpected_accessions": [],
         "included_companions": {},
@@ -1191,6 +1199,141 @@ def _census_fingerprint(state):
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _server_census_fingerprint(state):
+    """Return the census-scope fingerprint used by search_filing_census."""
+    payload = {
+        "accessions": sorted(
+            [
+                {
+                    "accession_number": accession,
+                    "ciks": record.get("issuer_ciks", [record.get("cik")]),
+                    "filing_type": record.get("filing_type"),
+                    "filing_date": record.get("filing_date"),
+                }
+                for accession, record in state["accessions"].items()
+            ],
+            key=lambda item: item["accession_number"],
+        ),
+        "date_from": state["scope"]["date_from"],
+        "date_to": state["scope"]["date_to"],
+        "filing_types": state["scope"]["expected_forms"],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _server_query_hash(queries, results_per_query):
+    """Return the exact query binding used by search_filing_census."""
+    payload = {
+        "queries": queries,
+        "results_per_query": results_per_query,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _valid_server_scan(state):
+    """Return whether a server-bound receipt matches the immutable local census."""
+    scan = state.get("server_scan")
+    rv = scan is None
+
+    if isinstance(scan, dict):
+        outcomes = scan.get("outcomes")
+        checked = state.get("server_checked")
+        failed = state.get("failed")
+        known_ciks = set(state.get("filers") or {})
+        valid_outcomes = isinstance(outcomes, list) and len(outcomes) == len(known_ciks)
+        outcome_ciks = set()
+
+        for outcome in outcomes or []:
+            cik = _valid_cik(outcome.get("cik")) if isinstance(outcome, dict) else None
+            coverage_state = outcome.get("coverage_state") if isinstance(outcome, dict) else None
+            source = outcome.get("source") if isinstance(outcome, dict) else None
+            status = outcome.get("status") if isinstance(outcome, dict) else None
+            reason = outcome.get("reason") if isinstance(outcome, dict) else None
+            valid_route = (
+                (coverage_state == "covered" and source == "internal")
+                or (coverage_state == "uncovered" and source == "sec")
+                or (
+                    coverage_state == "coverage_unknown"
+                    and source == "none"
+                    and status == "failed"
+                )
+            )
+            valid_outcomes = valid_outcomes and (
+                cik in known_ciks
+                and cik not in outcome_ciks
+                and valid_route
+                and status in {"checked_hit", "checked_empty", "failed"}
+                and (
+                    (status != "failed" and reason is None)
+                    or (status == "failed" and reason in ALLOWED_FAILURE_REASONS)
+                )
+            )
+
+            if cik:
+                outcome_ciks.add(cik)
+
+        checked_count = sum(
+            outcome.get("status") in {"checked_hit", "checked_empty"}
+            for outcome in outcomes or []
+            if isinstance(outcome, dict)
+        )
+        failed_count = sum(
+            outcome.get("status") == "failed"
+            for outcome in outcomes or []
+            if isinstance(outcome, dict)
+        )
+        expected_checked = {
+            outcome["cik"]
+            for outcome in outcomes or []
+            if isinstance(outcome, dict)
+            and outcome.get("status") in {"checked_hit", "checked_empty"}
+        }
+        expected_failed = {
+            outcome["cik"]
+            for outcome in outcomes or []
+            if isinstance(outcome, dict) and outcome.get("status") == "failed"
+        }
+        checked_hit = sum(
+            isinstance(outcome, dict) and outcome.get("status") == "checked_hit"
+            for outcome in outcomes or []
+        )
+        checked_empty = checked_count - checked_hit
+        expected_complete = (
+            state["enumeration"].get("coverage_complete") is True
+            and failed_count == 0
+            and checked_count == len(known_ciks)
+        )
+        rv = (
+            valid_outcomes
+            and outcome_ciks == known_ciks
+            and scan.get("request_binding") == "server_bound"
+            and scan.get("census_fingerprint") == _server_census_fingerprint(state)
+            and _valid_query_receipt(scan)
+            and _valid_response_id(scan.get("response_id"))
+            and _valid_response_id(scan.get("artifact_id"))
+            and _valid_non_negative_integer(scan.get("result_count"))
+            and scan.get("total_filers") == len(known_ciks)
+            and scan.get("checked_count") == checked_count
+            and scan.get("failed_count") == failed_count
+            and scan.get("checked") == checked_count
+            and scan.get("failed") == failed_count
+            and scan.get("checked_hit") == checked_hit
+            and scan.get("checked_empty") == checked_empty
+            and scan.get("complete") is expected_complete
+            and scan.get("census_complete") is state["enumeration"].get("coverage_complete")
+            and scan.get("census_issues") == state["enumeration"].get("issues")
+            and checked_count + failed_count == len(known_ciks)
+            and set(checked) == expected_checked
+            and set(failed) == expected_failed
+        )
+
+    return rv
 
 
 def _contains_capability_url(value):
@@ -1302,6 +1445,12 @@ def _validate_state(state):
     if "joint_satisfied" not in state:
         state["joint_satisfied"] = {}
 
+    if "server_checked" not in state:
+        state["server_checked"] = {}
+
+    if "server_scan" not in state:
+        state["server_scan"] = None
+
     if _contains_capability_url(state):
         raise HelperError("Capability URLs cannot be stored in coverage state.")
 
@@ -1317,6 +1466,7 @@ def _validate_state(state):
         "individually_checked",
         "joint_satisfied",
         "failed",
+        "server_checked",
         "included_companions",
         "excluded_post_census",
     )
@@ -1483,6 +1633,9 @@ def _validate_state(state):
     if state["census_fingerprint"] != _census_fingerprint(state):
         raise HelperError("The frozen census fingerprint does not match the coverage state.")
 
+    if not _valid_server_scan(state):
+        raise HelperError("The server-bound census scan receipt is invalid.")
+
     for key, companion in (
         ("included_companions", True),
         ("excluded_post_census", False),
@@ -1643,12 +1796,15 @@ def _validate_state(state):
         for receipt in list(state["broad_searches"].values())
         + list(state["individually_checked"].values())
     ]
+    if state["server_scan"] is not None:
+        response_ids.append(state["server_scan"]["response_id"])
 
     if len(response_ids) != len(set(response_ids)):
         raise HelperError("One saved search response is reused by multiple coverage receipts.")
 
     valid_response_owners = {f"broad:{form}" for form in expected_forms}
     valid_response_owners.update(f"ticker:{cik}" for cik in known_ciks)
+    valid_response_owners.add("server_scan")
 
     if any(
         not _valid_response_id(response_id) or owner not in valid_response_owners
@@ -1665,6 +1821,8 @@ def _validate_state(state):
         + list(state["individually_checked"].values())
         if receipt.get("artifact_id") is not None
     ]
+    if state["server_scan"] is not None:
+        artifact_ids.append(state["server_scan"]["artifact_id"])
 
     if len(artifact_ids) != len(set(artifact_ids)):
         raise HelperError("One saved artifact path is reused by multiple coverage receipts.")
@@ -1705,6 +1863,7 @@ def _validate_state(state):
 
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
+    server_checked = set(state["server_checked"])
     joint_satisfied = set(state["joint_satisfied"])
     failed = set(state["failed"])
 
@@ -1712,8 +1871,19 @@ def _validate_state(state):
         surfaced & checked or surfaced & failed or checked & failed
         or joint_satisfied & surfaced or joint_satisfied & checked
         or joint_satisfied & failed
+        or server_checked & surfaced or server_checked & checked
+        or server_checked & joint_satisfied or server_checked & failed
     ):
         raise HelperError("Coverage filer statuses must be mutually exclusive.")
+
+    if any(
+        cik not in known_ciks
+        or not isinstance(receipt, dict)
+        or receipt.get("status") not in {"checked_hit", "checked_empty"}
+        or receipt.get("source") not in {"internal", "sec"}
+        for cik, receipt in state["server_checked"].items()
+    ):
+        raise HelperError("The coverage state contains an invalid server-checked filer.")
 
     for target_cik, joint in state["joint_satisfied"].items():
         source_cik = joint.get("source_cik") if isinstance(joint, dict) else None
@@ -1764,6 +1934,8 @@ def reset_searches(state):
     state["individually_checked"] = {}
     state["joint_satisfied"] = {}
     state["failed"] = {}
+    state["server_checked"] = {}
+    state["server_scan"] = None
     state["unexpected"] = []
     state["unexpected_accessions"] = []
     state["included_companions"] = {}
@@ -2208,8 +2380,11 @@ def _missing_ciks(state):
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
     joint_satisfied = set(state["joint_satisfied"])
+    server_checked = set(state.get("server_checked") or {})
     failed = set(state["failed"])
-    return sorted(expected - surfaced - checked - joint_satisfied - failed)
+    return sorted(
+        expected - surfaced - checked - joint_satisfied - server_checked - failed
+    )
 
 
 def missing_filers(state, *, offset=0, limit=MAX_COVERAGE_ROWS):
@@ -2525,6 +2700,179 @@ def mark_filer(
     return (cik, eligible_results) if return_eligible else cik
 
 
+def import_server_scan(state, artifact_path, queries, results_per_query):
+    """Validate and import one complete server-bound census search receipt."""
+    _validate_state(state)
+
+    if state.get("server_scan") is not None:
+        raise HelperError("This coverage state already contains a server-bound census scan.")
+
+    if any(
+        (
+            state["broad_searches"],
+            state["broad_failures"],
+            state["individually_checked"],
+            state["joint_satisfied"],
+            state["failed"],
+        )
+    ):
+        raise HelperError(
+            "Reset existing search receipts before importing a server-bound census scan."
+        )
+
+    clean_queries = []
+
+    for query in queries or []:
+        clean_query = str(query or "").strip()
+
+        if not clean_query or len(clean_query) > 300:
+            raise HelperError("Every --query must contain 1 to 300 characters.")
+
+        if clean_query not in clean_queries:
+            clean_queries.append(clean_query)
+
+    if not 1 <= len(clean_queries) <= 12:
+        raise HelperError("Provide between 1 and 12 distinct --query values.")
+
+    if (
+        isinstance(results_per_query, bool)
+        or not isinstance(results_per_query, int)
+        or not 1 <= results_per_query <= 25
+    ):
+        raise HelperError("--results-per-query must be between 1 and 25.")
+
+    payload = _load_json_value(artifact_path)
+    results, result_count, response_id, artifact_id = load_search_response(artifact_path)
+    coverage = payload.get("coverage") if isinstance(payload, dict) else None
+
+    if not isinstance(coverage, dict) or coverage.get("request_binding") != "server_bound":
+        raise HelperError("The saved artifact lacks a server-bound coverage receipt.")
+
+    query_hash = _server_query_hash(clean_queries, results_per_query)
+
+    if coverage.get("query_hash") != query_hash:
+        raise HelperError("The server receipt does not match the supplied thematic queries.")
+
+    if coverage.get("census_fingerprint") != _server_census_fingerprint(state):
+        raise HelperError("The server receipt does not match the frozen filing census.")
+
+    outcomes = coverage.get("outcomes")
+
+    if not isinstance(outcomes, list):
+        raise HelperError("The server receipt is missing filer outcomes.")
+
+    checked_hit = sum(
+        isinstance(outcome, dict) and outcome.get("status") == "checked_hit"
+        for outcome in outcomes
+    )
+    checked_empty = sum(
+        isinstance(outcome, dict) and outcome.get("status") == "checked_empty"
+        for outcome in outcomes
+    )
+    failed_count = sum(
+        isinstance(outcome, dict) and outcome.get("status") == "failed"
+        for outcome in outcomes
+    )
+    checked_count = checked_hit + checked_empty
+    expected_complete = (
+        state["enumeration"].get("coverage_complete") is True
+        and failed_count == 0
+        and checked_count == len(state["filers"])
+    )
+
+    if not (
+        coverage.get("total_filers") == len(state["filers"])
+        and coverage.get("checked_count") == checked_count
+        and coverage.get("checked") == checked_count
+        and coverage.get("checked_hit") == checked_hit
+        and coverage.get("checked_empty") == checked_empty
+        and coverage.get("failed_count") == failed_count
+        and coverage.get("failed") == failed_count
+        and checked_count + failed_count == len(state["filers"])
+        and coverage.get("complete") is expected_complete
+        and coverage.get("census_complete") is state["enumeration"].get("coverage_complete")
+        and coverage.get("census_issues") == state["enumeration"].get("issues")
+        and coverage.get("date_from") == state["scope"].get("date_from")
+        and coverage.get("date_to") == state["scope"].get("date_to")
+        and coverage.get("filing_types") == state["scope"].get("expected_forms")
+    ):
+        raise HelperError("The server receipt has inconsistent census coverage arithmetic.")
+
+    for outcome in outcomes:
+        cik = _valid_cik(outcome.get("cik")) if isinstance(outcome, dict) else None
+        status = outcome.get("status") if isinstance(outcome, dict) else None
+
+        if cik not in state["filers"]:
+            raise HelperError("The server receipt contains an issuer outside the census.")
+
+        if status in {"checked_hit", "checked_empty"}:
+            state["server_checked"][cik] = {
+                "source": outcome.get("source"),
+                "status": status,
+            }
+
+        elif status == "failed":
+            state["failed"][cik] = {
+                "ticker": state["filers"][cik].get("search_ticker"),
+                "reason": outcome.get("reason"),
+            }
+
+        else:
+            raise HelperError("The server receipt contains an invalid filer outcome.")
+
+    for result in results:
+        scan_cik = _valid_cik(result.get("scan_cik"))
+        source_cik, accession = _sec_cik_and_accession(result)
+        census_record = state["accessions"].get(accession) if accession else None
+        known_joint_association = (
+            isinstance(census_record, dict)
+            and scan_cik in (census_record.get("issuer_ciks") or [])
+        )
+
+        if scan_cik not in state["filers"] or (
+            source_cik is not None and source_cik != scan_cik
+            and not known_joint_association
+        ):
+            raise HelperError("A server search result conflicts with its census issuer.")
+
+        if result.get("companion") is True and accession not in state["accessions"]:
+            if accession is None:
+                raise HelperError("A companion result is missing an SEC accession identity.")
+
+            _record_companion(state, result, scan_cik, accession)
+
+    plan = {
+        "query_count": len(clean_queries),
+        "query_hash": query_hash,
+    }
+    state["search_plan"] = plan
+    state["server_scan"] = {
+        **plan,
+        "request_binding": "server_bound",
+        "census_fingerprint": coverage.get("census_fingerprint"),
+        "response_id": response_id,
+        "artifact_id": artifact_id,
+        "result_count": result_count,
+        "total_filers": coverage.get("total_filers"),
+        "checked_count": coverage.get("checked_count"),
+        "failed_count": coverage.get("failed_count"),
+        "checked": coverage.get("checked"),
+        "failed": coverage.get("failed"),
+        "complete": coverage.get("complete"),
+        "census_complete": coverage.get("census_complete"),
+        "census_issues": coverage.get("census_issues"),
+        "checked_hit": coverage.get("checked_hit"),
+        "checked_empty": coverage.get("checked_empty"),
+        "outcomes": outcomes,
+    }
+    state["consumed_responses"][response_id] = "server_scan"
+    state["consumed_artifacts"][artifact_id] = "server_scan"
+    eligible_results = _eligible_results_for_state(state, results)
+    _validate_state(state)
+
+    return eligible_results
+
+
 def coverage_audit(state):
     """Return a compact audit of recorded checks for every expected filer."""
     _validate_state(state)
@@ -2533,9 +2881,15 @@ def coverage_audit(state):
     inconsistencies = list(dict.fromkeys(state["identity_issues"]))
     warnings = []
     accession_count = len(state["accessions"])
+    server_outcome_ciks = (
+        set(state.get("server_checked") or {}) | set(state.get("failed") or {})
+        if state.get("server_scan") is not None
+        else set()
+    )
     ticker_identity_is_resolved = all(
         _qualified_ticker(filer.get("search_ticker")) is not None
         or cik in state["broad_surfaced"]
+        or cik in server_outcome_ciks
         for cik, filer in state["filers"].items()
     )
 
@@ -2592,6 +2946,8 @@ def coverage_audit(state):
     if state["unexpected_accessions"]:
         _append_unique(inconsistencies, "unexpected_in_scope_accession")
 
+    server_bound = state.get("server_scan") is not None
+
     if state["broad_failures"]:
         _append_unique(inconsistencies, "broad_search_failed")
 
@@ -2602,12 +2958,12 @@ def coverage_audit(state):
     recorded_forms = set(state["broad_searches"])
     search_plan = state.get("search_plan")
 
-    if state["filers"] and recorded_forms != expected_forms:
+    if state["filers"] and not server_bound and recorded_forms != expected_forms:
         _append_unique(inconsistencies, "missing_broad_search_receipt")
 
     if state["filers"] and search_plan is None:
         _append_unique(inconsistencies, "missing_search_plan")
-    elif search_plan is not None:
+    elif search_plan is not None and not server_bound:
         receipts = (
             list(state["broad_searches"].values())
             + list(state["broad_failures"].values())
@@ -2626,6 +2982,8 @@ def coverage_audit(state):
         for cik, filer in state["filers"].items()
         if _qualified_ticker(filer.get("search_ticker")) is None
         and cik not in state["broad_surfaced"]
+        and cik not in state.get("server_checked", {})
+        and (not server_bound or cik not in state["failed"])
     )
     missing = _missing_ciks(state)
     failed = sorted(state["failed"])
@@ -2647,6 +3005,7 @@ def coverage_audit(state):
         ],
         "broad_search_filer_count": len(set(state["broad_surfaced"])),
         "individually_checked_filer_count": len(state["individually_checked"]),
+        "server_checked_filer_count": len(state.get("server_checked") or {}),
         "joint_satisfied_filer_count": len(state["joint_satisfied"]),
         "failed_filer_count": len(failed),
         "unsearchable_filer_count": len(unsearchable),
@@ -2665,7 +3024,7 @@ def coverage_audit(state):
                 else ""
             )
         ),
-        "request_binding": "agent_attested",
+        "request_binding": "server_bound" if server_bound else "agent_attested",
         "warnings": warnings,
         "coverage_issues": enumeration.get("issues") or [],
         "inconsistencies": inconsistencies,
@@ -2925,6 +3284,28 @@ def _argument_parser():
         help="Save the fetched immutable census for this scan.",
     )
 
+    coverage_import_scan = subparsers.add_parser("coverage-import-scan")
+    coverage_import_scan.add_argument("--state", type=Path, required=True)
+    scan_source = coverage_import_scan.add_mutually_exclusive_group(required=True)
+    scan_source.add_argument("--artifact", type=Path)
+    scan_source.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Fetch, save, and validate one completed census-search artifact.",
+    )
+    coverage_import_scan.add_argument("--save", type=Path)
+    coverage_import_scan.add_argument("--query", action="append", required=True)
+    coverage_import_scan.add_argument(
+        "--results-per-query",
+        type=int,
+        default=5,
+    )
+    coverage_import_scan.add_argument("--limit", type=int, default=MAX_SUMMARIES)
+    coverage_import_scan.add_argument("--offset", type=int, default=0)
+    coverage_import_scan.add_argument(
+        "--preview-chars", type=int, default=DEFAULT_PREVIEW_CHARS
+    )
+
     coverage_reset = subparsers.add_parser("coverage-reset-searches")
     coverage_reset.add_argument("--state", type=Path, required=True)
 
@@ -3130,6 +3511,60 @@ def main(argv=None):
                 "missing_filer_count": len(_missing_ciks(state)),
                 "coverage_issues": state["enumeration"]["issues"],
                 "inconsistencies": state["identity_issues"],
+            }
+
+        elif arguments.command == "coverage-import-scan":
+            state = _load_state(arguments.state)
+
+            if arguments.fetch:
+                if arguments.save is None:
+                    raise HelperError("--save is required with coverage-import-scan --fetch.")
+
+                if arguments.save.resolve() == arguments.state.resolve():
+                    raise HelperError("--save and --state must use different paths.")
+
+                url = sys.stdin.read().strip()
+                body = fetch_artifact_bytes(url)
+                _write_atomic(arguments.save, body)
+                artifact_path = arguments.save
+
+            else:
+                if arguments.save is not None:
+                    raise HelperError("--save is accepted only with --fetch.")
+
+                artifact_path = arguments.artifact
+
+            eligible_results = import_server_scan(
+                state,
+                artifact_path,
+                arguments.query,
+                arguments.results_per_query,
+            )
+            _write_state(arguments.state, state)
+            results, _count, response_id, artifact_id = load_search_response(artifact_path)
+            summaries = _write_summary_index(
+                artifact_path,
+                state,
+                response_id,
+                artifact_id,
+                eligible_results,
+            )
+            output = {
+                "status": "recorded",
+                "request_binding": "server_bound",
+                "result_count": len(results),
+                "eligible_result_count": len(eligible_results),
+                "checked_filer_count": len(state["server_checked"]),
+                "failed_filer_count": len(state["failed"]),
+                "missing_filer_count": len(_missing_ciks(state)),
+                "included_companion_filing_count": len(state["included_companions"]),
+                "summary_index_available": True,
+                **_summary_page_from_summaries(
+                    summaries,
+                    limit=arguments.limit,
+                    offset=arguments.offset,
+                    preview_chars=arguments.preview_chars,
+                ),
             }
 
         elif arguments.command == "coverage-reset-searches":

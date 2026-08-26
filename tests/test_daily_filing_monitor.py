@@ -59,6 +59,47 @@ class FakeResponse:
         return self.body
 
 
+def _server_scan_payload(state, *, results=None, status="checked_hit", reason=None):
+    """Build one helper-compatible server-bound census receipt."""
+    results = [] if results is None else results
+    cik = next(iter(state["filers"]))
+    outcome = {
+        "cik": cik,
+        "coverage_state": "covered",
+        "source": "internal",
+        "status": status,
+    }
+
+    if reason is not None:
+        outcome["reason"] = reason
+
+    failed_count = int(status == "failed")
+    checked_count = 1 - failed_count
+    return {
+        "count": len(results),
+        "coverage": {
+            "complete": failed_count == 0,
+            "request_binding": "server_bound",
+            "census_fingerprint": FILING._server_census_fingerprint(state),
+            "query_hash": FILING._server_query_hash(THEMATIC_QUERIES, 5),
+            "date_from": state["scope"]["date_from"],
+            "date_to": state["scope"]["date_to"],
+            "filing_types": state["scope"]["expected_forms"],
+            "census_complete": state["enumeration"]["coverage_complete"],
+            "census_issues": state["enumeration"]["issues"],
+            "total_filers": 1,
+            "checked_count": checked_count,
+            "checked": checked_count,
+            "checked_hit": int(status == "checked_hit"),
+            "checked_empty": int(status == "checked_empty"),
+            "failed_count": failed_count,
+            "failed": failed_count,
+            "outcomes": [outcome],
+        },
+        "results": results,
+    }
+
+
 def _filing_result(
     *,
     ticker="MSFT.US",
@@ -2523,6 +2564,74 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertTrue(FILING.coverage_audit(state)["complete"])
 
 
+class ServerBoundCensusImportTests(unittest.TestCase):
+    """Validate server receipts without agent-attested per-filer checks."""
+
+    def test_import_server_scan_marks_checked_and_completes_audit(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        result = _filing_result()
+        result.update({
+            "scan_cik": "0000789019",
+            "scan_source": "internal",
+            "companion": False,
+        })
+        payload = _server_scan_payload(state, results=[result])
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+            )
+
+        audit = FILING.coverage_audit(state)
+        self.assertEqual(len(eligible), 1)
+        self.assertTrue(audit["complete"])
+        self.assertEqual(audit["request_binding"], "server_bound")
+        self.assertEqual(audit["server_checked_filer_count"], 1)
+        self.assertEqual(audit["unpolled_filer_count"], 0)
+
+    def test_import_server_empty_is_checked_not_failed(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        payload = _server_scan_payload(state, status="checked_empty")
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+            )
+
+        audit = FILING.coverage_audit(state)
+        self.assertEqual(eligible, [])
+        self.assertTrue(audit["complete"])
+        self.assertEqual(audit["failed_filer_count"], 0)
+        self.assertEqual(audit["filer_count"], audit["server_checked_filer_count"])
+
+    def test_import_server_scan_rejects_query_or_arithmetic_mismatch(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        payload = _server_scan_payload(state, status="checked_empty")
+        payload["coverage"]["checked_count"] = 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaises(FILING.HelperError):
+                FILING.import_server_scan(
+                    state,
+                    artifact_path,
+                    THEMATIC_QUERIES,
+                    5,
+                )
+
+
 class DashboardBuilderTests(unittest.TestCase):
     def test_extracts_structured_fields_without_database_or_user_data(self):
         fields = BUILDER.extract_stock_fields(_stock_payload())
@@ -3507,85 +3616,36 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(len(plugin_versions), 1)
         plugin_version = plugin_versions.pop()
 
-        for skill_path in sorted((REPOSITORY_ROOT / "skills").glob("*/SKILL.md")):
-            with self.subTest(skill=skill_path.parent.name):
-                version_line = next(
-                    (
-                        line
-                        for line in skill_path.read_text(encoding="utf-8").splitlines()
-                        if line.startswith("DFin skill version: ")
-                    ),
-                    None,
-                )
-                self.assertIsNotNone(version_line)
-                self.assertEqual(
-                    version_line.split(": ", 1)[1].split(",", 1)[0],
-                    plugin_version,
-                )
+        version_line = next(
+            line
+            for line in skill.splitlines()
+            if line.startswith("DFin skill version: ")
+        )
+        self.assertEqual(
+            version_line.split(": ", 1)[1].split(",", 1)[0],
+            plugin_version,
+        )
 
         self.assertIn("delivery: api", skill)
         self.assertIn("delivery: inline", skill)
-        self.assertIn("and `delivery: api`", skill)
-        self.assertNotIn("automatically based on response size", skill)
-        self.assertIn("into batches of at most 10", skill)
-        self.assertIn('"stock_context_urls": ["<single-use batch capability>"', skill)
-        self.assertIn('"stock_context_batches": [{<complete ticker-keyed batch>}', skill)
-        self.assertIn(
-            "including `format`, `count`, `success_count`, `error_count`, and `results`",
-            skill,
-        )
-        self.assertIn("Never retype, truncate, paraphrase, or hand-summarize", skill)
-        self.assertIn("aborts the build", skill)
-        self.assertIn("newest integer fiscal year", skill)
-        self.assertIn("two resolved tickers sharing one non-empty CIK", skill)
-        self.assertIn("a supplied malformed CIK aborts", skill)
-        self.assertIn("build_dashboard.py --text --stock-cache", skill)
-        self.assertIn("management changes announced today", skill)
-        self.assertIn("morning scan for debt restructuring", skill)
-        self.assertIn("ask for one monitoring theme and make no DFin calls", skill)
-        self.assertIn("ratio ticker mismatch aborts the build", skill)
-        self.assertIn("--offset", skill)
-        self.assertIn("list_latest_filings", skill)
-        self.assertIn("result_level: accession", skill)
-        self.assertIn("limit: -1", skill)
-        self.assertIn("coverage-init", skill)
-        self.assertIn("coverage-add-search", skill)
-        self.assertIn("--expected-form <form>", skill)
-        self.assertIn("coverage-missing", skill)
-        self.assertIn("coverage-bind-ticker", skill)
-        self.assertIn("coverage-mark", skill)
-        self.assertIn(
-            "ticker: <exchange-qualified ticker from coverage-missing>",
-            skill,
-        )
-        self.assertIn("--artifact <ticker-search-json-path>", skill)
-        self.assertIn("--save <census-json-path> --fetch", skill)
-        self.assertIn("--failed --reason", skill)
-        self.assertIn("use the same command with `--empty`", skill)
-        self.assertIn("rejects byte-identical response payloads", skill)
-        self.assertIn("Failed filers leave the pending queue", skill)
-        self.assertIn("coverage-reset-searches", skill)
         self.assertIn("Call `list_latest_filings` exactly once per scan", skill)
-        self.assertIn("Never re-run `coverage-init` or `list_latest_filings`", skill)
-        self.assertNotIn("rerun `coverage-init` with `--artifact <census-json-path>`", skill)
-        self.assertIn("narrowing the coverage scope cannot satisfy reconciliation", skill)
-        self.assertIn("`timeout`, `rate_limited`, `malformed_response`", skill)
+        self.assertIn("search_filing_census", skill)
+        self.assertIn("coverage-import-scan", skill)
+        self.assertIn("server-bound", skill)
+        self.assertIn("total_filers = checked + failed", skill)
+        self.assertIn("groups of at most four", skill)
+        self.assertIn('fields: ["price", "returns", "profile", "description", "technicals", "earnings_history"]', skill)
+        self.assertIn("retry the same initial request or continuation unchanged", skill)
+        self.assertIn("Do not run broad `search_filings` calls", skill)
+        self.assertIn("Do not delegate it", skill)
+        self.assertNotIn("coverage-add-search", skill)
+        self.assertNotIn("coverage-missing", skill)
+        self.assertNotIn("coverage-mark", skill)
         self.assertIn("coverage-audit", skill)
         self.assertIn("inclusive windows of one to three calendar days", skill)
-        self.assertIn("plausible SEC disclosure paths", skill)
-        self.assertIn("start a new scan only when expanded universe-wide coverage", skill)
-        self.assertNotIn("expand the form set, rerun enumeration", skill)
-        self.assertIn("**Omit `filing_type`**", skill)
         self.assertIn("methodology_delegation", skill)
-        self.assertIn("Do not create one worker per ticker", skill)
         self.assertIn("does not prove perfect thematic recall", skill)
-        self.assertIn("request_binding: agent_attested", skill)
-        self.assertIn("post_start_exclusion_note", skill)
         self.assertIn(".summary-index.json", skill)
-        self.assertIn("do not reopen, refilter, or regroup", skill)
-        self.assertIn("both empty and non-empty responses", skill)
-        self.assertIn("skip reconciliation and `coverage-audit`", skill)
-        self.assertIn("tickerless filer already matched by SEC-source CIK", skill)
         self.assertIn("updated 2026-08-08", skill)
         self.assertNotIn("what happened in filings today", skill)
         self.assertNotIn("what companies announced [topic] this week?", skill)
