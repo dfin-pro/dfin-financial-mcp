@@ -2363,6 +2363,166 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertTrue(audit_output["complete"])
 
 
+    def test_joint_accession_binds_each_issuer_without_duplicate_accessions(self):
+        """Frozen joint accessions belong to all listed issuers but remain unique."""
+        joint = _accession_row(cik="0000010456", accession="0001193125-26-356188")
+        joint["issuers"] = [
+            {"cik": "0000010456", "issuer_name": "Baxter", "tickers": ["BAX.US"]},
+            {"cik": "0000789019", "issuer_name": "Microsoft", "tickers": ["MSFT.US"]},
+        ]
+        state = FILING._enumeration_state(_enumeration_payload([joint]), ["8-K"])
+
+        self.assertEqual(len(state["accessions"]), 1)
+        self.assertEqual(state["accessions"]["0001193125-26-356188"]["issuer_ciks"], ["0000010456", "0000789019"])
+        self.assertIn("0001193125-26-356188", state["filers"]["0000010456"]["accessions"])
+        self.assertIn("0001193125-26-356188", state["filers"]["0000789019"]["accessions"])
+
+        eligible = FILING.add_broad_search_results(
+            state,
+            [_filing_result(
+                ticker="BAX.US", cik="10456", accession="000119312526356188",
+                name="Baxter",
+            )],
+            "8-K",
+            THEMATIC_QUERIES,
+            response_id=_response_id("joint-accession"),
+            return_eligible=True,
+        )[1]
+
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(FILING.missing_filers(state)["missing_filer_count"], 0)
+
+    def test_joint_accession_accepts_nonlisted_archive_owner_from_broad_search(self):
+        joint = _accession_row(cik="0000010456", accession="0001193125-26-356188")
+        joint["issuers"] = [
+            {"cik": "0000010456", "issuer_name": "Baxter", "tickers": ["BAX.US"]},
+            {"cik": "0000789019", "issuer_name": "Microsoft", "tickers": ["MSFT.US"]},
+        ]
+        state = FILING._enumeration_state(_enumeration_payload([joint]), ["8-K"])
+
+        result = _filing_result(
+            ticker=None,
+            cik="999999",
+            accession="000119312526356188",
+            name="Joint filer",
+        )
+        _matched, eligible = FILING.add_broad_search_results(
+            state,
+            [result],
+            "8-K",
+            THEMATIC_QUERIES,
+            response_id=_response_id("joint-nonlisted-archive-owner"),
+            return_eligible=True,
+        )
+
+        self.assertEqual(1, len(eligible))
+        self.assertEqual(1, len(FILING._eligible_results_for_state(state, [result])))
+        self.assertEqual(0, FILING.missing_filers(state)["missing_filer_count"])
+
+    def test_version_four_scalar_state_without_joint_map_is_upgraded(self):
+        state = FILING._enumeration_state(
+            _enumeration_payload([_accession_row()]),
+            ["8-K"],
+        )
+        state.pop("joint_satisfied")
+
+        validated = FILING._validate_state(state)
+
+        self.assertEqual({}, validated["joint_satisfied"])
+
+    def test_ticker_joint_result_satisfies_associated_issuer_with_one_receipt(self):
+        joint = _accession_row(cik="0000010456", accession="0001193125-26-356188")
+        joint["issuers"] = [
+            {"cik": "0000010456", "issuer_name": "Baxter", "tickers": ["BAX.US"]},
+            {"cik": "0000789019", "issuer_name": "Microsoft", "tickers": ["MSFT.US"]},
+        ]
+        state = FILING._enumeration_state(_enumeration_payload([joint]), ["8-K"])
+        FILING.add_broad_search_results(
+            state,
+            [],
+            "8-K",
+            THEMATIC_QUERIES,
+            result_count=0,
+            attested_empty=True,
+        )
+
+        _cik, eligible = FILING.mark_filer(
+            state,
+            "BAX.US",
+            "checked",
+            results=[_filing_result(
+                ticker="BAX.US",
+                cik="999999",
+                accession="000119312526356188",
+                name="Baxter",
+            )],
+            result_count=1,
+            queries=THEMATIC_QUERIES,
+            response_id=_response_id("ticker-joint-accession"),
+            return_eligible=True,
+        )
+        audit = FILING.coverage_audit(state)
+
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(
+            state["joint_satisfied"]["0000789019"],
+            {"source_cik": "0000010456", "accession": "0001193125-26-356188"},
+        )
+        self.assertEqual(FILING.missing_filers(state)["missing_filer_count"], 0)
+        self.assertEqual(audit["joint_satisfied_filer_count"], 1)
+        self.assertTrue(audit["complete"])
+
+        tampered = json.loads(json.dumps(state))
+        tampered["joint_satisfied"]["0000789019"]["accession"] = (
+            "0000789019-26-999999"
+        )
+        with self.assertRaisesRegex(FILING.HelperError, "invalid joint receipt"):
+            FILING._validate_state(tampered)
+
+    def test_ticker_joint_result_does_not_overlap_a_prior_direct_receipt(self):
+        joint = _accession_row(cik="0000010456", accession="0001193125-26-356188")
+        joint["issuers"] = [
+            {"cik": "0000010456", "issuer_name": "Baxter", "tickers": ["BAX.US"]},
+            {"cik": "0000789019", "issuer_name": "Microsoft", "tickers": ["MSFT.US"]},
+        ]
+        state = FILING._enumeration_state(_enumeration_payload([joint]), ["8-K"])
+        FILING.add_broad_search_results(
+            state,
+            [],
+            "8-K",
+            THEMATIC_QUERIES,
+            result_count=0,
+            attested_empty=True,
+        )
+        FILING.mark_filer(
+            state,
+            "MSFT.US",
+            "checked",
+            results=[],
+            result_count=0,
+            queries=THEMATIC_QUERIES,
+            attested_empty=True,
+        )
+        FILING.mark_filer(
+            state,
+            "BAX.US",
+            "checked",
+            results=[_filing_result(
+                ticker="BAX.US",
+                cik="10456",
+                accession="000119312526356188",
+                name="Baxter",
+            )],
+            result_count=1,
+            queries=THEMATIC_QUERIES,
+            response_id=_response_id("ticker-joint-after-direct"),
+        )
+
+        self.assertIn("0000789019", state["individually_checked"])
+        self.assertNotIn("0000789019", state["joint_satisfied"])
+        self.assertTrue(FILING.coverage_audit(state)["complete"])
+
+
 class DashboardBuilderTests(unittest.TestCase):
     def test_extracts_structured_fields_without_database_or_user_data(self):
         fields = BUILDER.extract_stock_fields(_stock_payload())

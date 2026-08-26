@@ -951,8 +951,45 @@ def _enumeration_state(payload, expected_forms):
         filing_type = " ".join(str(row.get("filing_type") or "").split()).upper()
         filing_date = str(row.get("filing_date") or "").strip()
 
-        if accession is None or cik is None or not filing_type:
+        issuer_rows = row.get("issuers")
+
+        if issuer_rows is None:
+            issuer_rows = [{
+                "cik": cik,
+                "issuer_name": str(row.get("issuer_name") or ""),
+                "tickers": row.get("tickers") if isinstance(row.get("tickers"), list) else [],
+            }]
+
+        issuers = []
+
+        if isinstance(issuer_rows, list):
+            for issuer in issuer_rows:
+                issuer_cik = _valid_cik(issuer.get("cik")) if isinstance(issuer, dict) else None
+                issuer_name = issuer.get("issuer_name") if isinstance(issuer, dict) else None
+                issuer_tickers = issuer.get("tickers") if isinstance(issuer, dict) else None
+
+                if (
+                    issuer_cik is None
+                    or not isinstance(issuer_name, str)
+                    or not isinstance(issuer_tickers, list)
+                ):
+                    _append_unique(inconsistencies, "malformed_issuer_association")
+                    continue
+
+                issuers.append({
+                    "cik": issuer_cik,
+                    "issuer_name": issuer_name,
+                    "tickers": issuer_tickers,
+                })
+
+        if accession is None or cik is None or not filing_type or not issuers:
             _append_unique(inconsistencies, "malformed_accession_row")
+            continue
+
+        issuers_by_cik = {issuer["cik"]: issuer for issuer in issuers}
+
+        if cik not in issuers_by_cik:
+            _append_unique(inconsistencies, "conflicting_accession_identity")
             continue
 
         try:
@@ -972,6 +1009,7 @@ def _enumeration_state(payload, expected_forms):
         existing_accession = accessions.get(accession)
         accession_record = {
             "cik": cik,
+            "issuer_ciks": sorted(issuers_by_cik),
             "filing_type": filing_type,
             "filing_date": filing_date,
         }
@@ -985,46 +1023,48 @@ def _enumeration_state(payload, expected_forms):
         observed_by_filing_type[filing_type] = (
             observed_by_filing_type.get(filing_type, 0) + 1
         )
-        filer = filers.setdefault(
-            cik,
-            {
-                "cik": cik,
-                "issuer_name": str(row.get("issuer_name") or ""),
-                "tickers": [],
-                "search_ticker": None,
-                "census_tickers": [],
-                "census_search_ticker": None,
-                "accessions": [],
-                "filing_types": [],
-                "filing_dates": [],
-            },
-        )
-        _append_unique(filer["accessions"], accession)
-        _append_unique(filer["filing_types"], filing_type)
-        _append_unique(filer["filing_dates"], filing_date)
-        tickers = row.get("tickers")
+        for issuer_cik in sorted(issuers_by_cik):
+            issuer = issuers_by_cik[issuer_cik]
+            filer = filers.setdefault(
+                issuer_cik,
+                {
+                    "cik": issuer_cik,
+                    "issuer_name": issuer["issuer_name"],
+                    "tickers": [],
+                    "search_ticker": None,
+                    "census_tickers": [],
+                    "census_search_ticker": None,
+                    "accessions": [],
+                    "filing_types": [],
+                    "filing_dates": [],
+                },
+            )
+            _append_unique(filer["accessions"], accession)
+            _append_unique(filer["filing_types"], filing_type)
+            _append_unique(filer["filing_dates"], filing_date)
+            tickers = issuer["tickers"]
 
-        if not isinstance(tickers, list):
-            _append_unique(inconsistencies, "malformed_ticker_aliases")
-            tickers = []
+            if not isinstance(tickers, list):
+                _append_unique(inconsistencies, "malformed_ticker_aliases")
+                tickers = []
 
-        known_tickers = {value.upper() for value in filer["tickers"]}
+            known_tickers = {value.upper() for value in filer["tickers"]}
 
-        for ticker_value in tickers:
-            ticker = _qualified_ticker(ticker_value)
+            for ticker_value in tickers:
+                ticker = _qualified_ticker(ticker_value)
 
-            if ticker is None:
-                _append_unique(inconsistencies, "malformed_ticker_alias")
-                continue
+                if ticker is None:
+                    _append_unique(inconsistencies, "malformed_ticker_alias")
+                    continue
 
-            canonical_ticker = ticker.upper()
+                canonical_ticker = ticker.upper()
 
-            if canonical_ticker not in known_tickers:
-                filer["tickers"].append(ticker)
-                known_tickers.add(canonical_ticker)
+                if canonical_ticker not in known_tickers:
+                    filer["tickers"].append(ticker)
+                    known_tickers.add(canonical_ticker)
 
-            if filer["search_ticker"] is None:
-                filer["search_ticker"] = ticker
+                if filer["search_ticker"] is None:
+                    filer["search_ticker"] = ticker
 
     for filer in filers.values():
         filer["census_tickers"] = list(filer["tickers"])
@@ -1119,6 +1159,7 @@ def _enumeration_state(payload, expected_forms):
         "consumed_artifacts": {},
         "broad_surfaced": [],
         "individually_checked": {},
+        "joint_satisfied": {},
         "failed": {},
         "unexpected": [],
         "unexpected_accessions": [],
@@ -1255,6 +1296,12 @@ def _validate_state(state):
     if not isinstance(state, dict) or state.get("schema_version") != COVERAGE_STATE_VERSION:
         raise HelperError("The coverage state is missing or has an unsupported schema version.")
 
+    # Version-4 states created before joint-accession support have no derived
+    # joint receipt map. Adding the empty map preserves resumability without
+    # changing the immutable census or its fingerprint.
+    if "joint_satisfied" not in state:
+        state["joint_satisfied"] = {}
+
     if _contains_capability_url(state):
         raise HelperError("Capability URLs cannot be stored in coverage state.")
 
@@ -1268,6 +1315,7 @@ def _validate_state(state):
         "consumed_responses",
         "consumed_artifacts",
         "individually_checked",
+        "joint_satisfied",
         "failed",
         "included_companions",
         "excluded_post_census",
@@ -1309,6 +1357,22 @@ def _validate_state(state):
         if cik is None:
             raise HelperError("The coverage state contains an invalid accession CIK.")
 
+        issuer_ciks = record.get("issuer_ciks", [cik])
+        normalized_issuer_ciks = [
+            _valid_cik(value) for value in issuer_ciks
+        ] if isinstance(issuer_ciks, list) else []
+
+        if (
+            not isinstance(issuer_ciks, list)
+            or not issuer_ciks
+            or cik not in issuer_ciks
+            or any(value is None for value in normalized_issuer_ciks)
+            or issuer_ciks != sorted(set(normalized_issuer_ciks))
+        ):
+            raise HelperError("The coverage state contains invalid accession issuer associations.")
+
+        accession_owners[accession] = set(issuer_ciks)
+
         filing_type = " ".join(str(record.get("filing_type") or "").split()).upper()
 
         if not filing_type or not any(
@@ -1346,13 +1410,8 @@ def _validate_state(state):
             raise HelperError("Every coverage filer must own at least one accession.")
 
         for accession in filer["accessions"]:
-            if accession not in accessions or accessions[accession].get("cik") != cik:
+            if accession not in accessions or cik not in accessions[accession].get("issuer_ciks", [accessions[accession].get("cik")]):
                 raise HelperError("The coverage state contains an invalid filer/accession link.")
-
-            if accession in accession_owners:
-                raise HelperError("A coverage accession is assigned to more than one filer.")
-
-            accession_owners[accession] = cik
 
         expected_filing_types = list(
             dict.fromkeys(accessions[value]["filing_type"] for value in filer["accessions"])
@@ -1408,8 +1467,13 @@ def _validate_state(state):
         ):
             raise HelperError("The coverage state contains an invalid frozen search ticker.")
 
-    if set(accession_owners) != set(accessions):
-        raise HelperError("The coverage state does not assign every accession to one filer.")
+    if set(accession_owners) != set(accessions) or any(
+        owners != {
+            cik for cik, filer in filers.items() if accession in filer["accessions"]
+        }
+        for accession, owners in accession_owners.items()
+    ):
+        raise HelperError("The coverage state does not assign every accession to its issuer filers.")
 
     known_ciks = set(filers)
 
@@ -1641,10 +1705,27 @@ def _validate_state(state):
 
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
+    joint_satisfied = set(state["joint_satisfied"])
     failed = set(state["failed"])
 
-    if surfaced & checked or surfaced & failed or checked & failed:
+    if (
+        surfaced & checked or surfaced & failed or checked & failed
+        or joint_satisfied & surfaced or joint_satisfied & checked
+        or joint_satisfied & failed
+    ):
         raise HelperError("Coverage filer statuses must be mutually exclusive.")
+
+    for target_cik, joint in state["joint_satisfied"].items():
+        source_cik = joint.get("source_cik") if isinstance(joint, dict) else None
+        accession = joint.get("accession") if isinstance(joint, dict) else None
+        record = state["accessions"].get(accession)
+        if (
+            target_cik not in known_ciks or source_cik not in state["individually_checked"]
+            or source_cik == target_cik or not isinstance(record, dict)
+            or target_cik not in record.get("issuer_ciks", [])
+            or source_cik not in record.get("issuer_ciks", [])
+        ):
+            raise HelperError("The coverage state contains an invalid joint receipt.")
 
     return state
 
@@ -1681,6 +1762,7 @@ def reset_searches(state):
     state["consumed_artifacts"] = {}
     state["broad_surfaced"] = []
     state["individually_checked"] = {}
+    state["joint_satisfied"] = {}
     state["failed"] = {}
     state["unexpected"] = []
     state["unexpected_accessions"] = []
@@ -1742,15 +1824,43 @@ def _saved_accession_record(state, accession):
     return None, None
 
 
-def _accession_record_matches_result(record, source_cik, result):
-    """Return whether one saved accession identity matches a search result."""
-    if not isinstance(record, dict) or record.get("cik") != source_cik:
+def _accession_metadata_matches_result(record, result):
+    """Return whether one saved accession has the result's form and date."""
+    if not isinstance(record, dict):
         return False
 
     saved_form = normalize_form(record.get("filing_type"))[0]
     result_form = normalize_form(result.get("filing_type"))[0]
     result_date = str(result.get("filing_date") or "").strip()
     return record.get("filing_date") == result_date and saved_form == result_form
+
+
+def _accession_record_matches_result(record, source_cik, result):
+    """Return whether one saved accession identity matches a search result."""
+    issuer_ciks = record.get("issuer_ciks", [record.get("cik")]) if isinstance(record, dict) else []
+    return (
+        isinstance(record, dict)
+        and source_cik in issuer_ciks
+        and _accession_metadata_matches_result(record, result)
+    )
+
+
+def _result_source_matches_accession_record(state, source_cik, ticker_ciks, record):
+    """Allow authoritative listed issuers or an external SEC archive owner."""
+    issuer_ciks = set(record.get("issuer_ciks", [])) if isinstance(record, dict) else set()
+    rv = source_cik in issuer_ciks
+
+    if not rv and source_cik not in state["filers"]:
+        rv = not ticker_ciks or set(ticker_ciks).issubset(issuer_ciks)
+
+    return rv
+
+
+def _accession_issuer_ciks(state, accession, source_cik):
+    """Return every frozen issuer CIK associated with one authoritative accession."""
+    record = state["accessions"].get(accession)
+    issuer_ciks = record.get("issuer_ciks", []) if isinstance(record, dict) else []
+    return sorted(set(issuer_ciks)) if source_cik in issuer_ciks else [source_cik]
 
 
 def _eligible_results_for_state(state, results):
@@ -1763,17 +1873,29 @@ def _eligible_results_for_state(state, results):
         source_cik, accession = _sec_cik_and_accession(result)
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
+        classification, accession_record = (
+            _saved_accession_record(state, accession)
+            if accession is not None
+            else (None, None)
+        )
 
-        if source_cik in state["filers"]:
+        if (
+            classification == "census"
+            and _accession_metadata_matches_result(accession_record, result)
+            and _result_source_matches_accession_record(
+                state,
+                source_cik,
+                ticker_ciks,
+                accession_record,
+            )
+        ):
+            eligible.append(result)
+
+        elif source_cik in state["filers"]:
             if ticker_ciks and source_cik not in ticker_ciks:
                 continue
 
             if accession is not None:
-                classification, accession_record = _saved_accession_record(
-                    state,
-                    accession,
-                )
-
                 if classification == "excluded" or not _accession_record_matches_result(
                     accession_record,
                     source_cik,
@@ -1901,6 +2023,7 @@ def add_broad_search_results(
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
         matched_cik = None
+        association_cik = source_cik
         is_companion = False
 
         if source_cik in state["filers"]:
@@ -1915,7 +2038,7 @@ def add_broad_search_results(
 
                 elif (
                     classification == "excluded"
-                    or accession_record.get("cik") != source_cik
+                    or source_cik not in accession_record.get("issuer_ciks", [accession_record.get("cik")])
                 ):
                     _append_unique(state["identity_issues"], "search_identity_conflict")
                     continue
@@ -1959,7 +2082,21 @@ def add_broad_search_results(
         elif source_cik and accession:
             classification, accession_record = _saved_accession_record(state, accession)
 
-            if classification in {"census", "companion"}:
+            if (
+                classification == "census"
+                and _accession_metadata_matches_result(accession_record, result)
+                and _result_source_matches_accession_record(
+                    state,
+                    source_cik,
+                    ticker_ciks,
+                    accession_record,
+                )
+            ):
+                matched_cik = accession_record["cik"]
+                association_cik = accession_record["cik"]
+                authoritative_ciks.update(accession_record.get("issuer_ciks", []))
+
+            elif classification in {"census", "companion"}:
                 _append_unique(state["identity_issues"], "search_identity_conflict")
             elif classification == "excluded" and not _accession_record_matches_result(
                 accession_record,
@@ -1973,7 +2110,8 @@ def add_broad_search_results(
             elif classification is None:
                 _record_excluded_post_census(state, result, source_cik, accession)
 
-            continue
+            if matched_cik is None:
+                continue
 
         elif len(ticker_ciks) == 1:
             matched_cik = next(iter(ticker_ciks))
@@ -1983,10 +2121,16 @@ def add_broad_search_results(
             continue
 
         if matched_cik:
-            matched_ciks.add(matched_cik)
+            associated_ciks = (
+                _accession_issuer_ciks(state, accession, association_cik)
+                if accession is not None and association_cik is not None
+                else [matched_cik]
+            )
+            matched_ciks.update(associated_ciks)
             eligible_results.append(result)
-            state["failed"].pop(matched_cik, None)
-            state["individually_checked"].pop(matched_cik, None)
+            for associated_cik in associated_ciks:
+                state["failed"].pop(associated_cik, None)
+                state["individually_checked"].pop(associated_cik, None)
         else:
             unexpected = {
                 "cik": source_cik,
@@ -2063,8 +2207,9 @@ def _missing_ciks(state):
     expected = set(state["filers"])
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
+    joint_satisfied = set(state["joint_satisfied"])
     failed = set(state["failed"])
-    return sorted(expected - surfaced - checked - failed)
+    return sorted(expected - surfaced - checked - joint_satisfied - failed)
 
 
 def missing_filers(state, *, offset=0, limit=MAX_COVERAGE_ROWS):
@@ -2162,6 +2307,26 @@ def _filter_ticker_search_results(state, cik, results):
         source_cik, accession = _sec_cik_and_accession(result)
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
+        classification, accession_record = (
+            _saved_accession_record(state, accession)
+            if accession is not None
+            else (None, None)
+        )
+        is_requested_joint_accession = (
+            classification == "census"
+            and cik in accession_record.get("issuer_ciks", [])
+            and _accession_metadata_matches_result(accession_record, result)
+            and _result_source_matches_accession_record(
+                state,
+                source_cik,
+                ticker_ciks,
+                accession_record,
+            )
+        )
+
+        if is_requested_joint_accession:
+            eligible.append(result)
+            continue
 
         if source_cik in state["filers"]:
             if source_cik != cik or (ticker_ciks and cik not in ticker_ciks):
@@ -2170,16 +2335,11 @@ def _filter_ticker_search_results(state, cik, results):
                 )
 
             if accession is not None:
-                classification, accession_record = _saved_accession_record(
-                    state,
-                    accession,
-                )
-
                 if classification is None:
                     _record_companion(state, result, source_cik, accession)
                 elif (
                     classification == "excluded"
-                    or accession_record.get("cik") != source_cik
+                    or source_cik not in accession_record.get("issuer_ciks", [accession_record.get("cik")])
                 ):
                     raise HelperError(
                         "A ticker-search accession belongs to a different census filer."
@@ -2199,8 +2359,6 @@ def _filter_ticker_search_results(state, cik, results):
                 raise HelperError(
                     "A ticker-search result belongs to a different filer than --ticker."
                 )
-
-            classification, accession_record = _saved_accession_record(state, accession)
 
             if classification in {"census", "companion"}:
                 raise HelperError(
@@ -2328,6 +2486,25 @@ def mark_filer(
             state["consumed_artifacts"][artifact_id] = owner
 
         state["failed"].pop(cik, None)
+        for result in eligible_results:
+            _source_cik, accession = _sec_cik_and_accession(result)
+            accession_record = state["accessions"].get(accession)
+            if (
+                isinstance(accession_record, dict)
+                and cik in accession_record.get("issuer_ciks", [])
+                and _accession_metadata_matches_result(accession_record, result)
+            ):
+                for associated_cik in _accession_issuer_ciks(state, accession, cik):
+                    if (
+                        associated_cik != cik
+                        and associated_cik not in state["broad_surfaced"]
+                        and associated_cik not in state["individually_checked"]
+                    ):
+                        state["joint_satisfied"][associated_cik] = {
+                            "source_cik": cik,
+                            "accession": accession,
+                        }
+                        state["failed"].pop(associated_cik, None)
     else:
         if reason is None:
             raise HelperError("--reason is required when --status failed.")
@@ -2470,6 +2647,7 @@ def coverage_audit(state):
         ],
         "broad_search_filer_count": len(set(state["broad_surfaced"])),
         "individually_checked_filer_count": len(state["individually_checked"]),
+        "joint_satisfied_filer_count": len(state["joint_satisfied"]),
         "failed_filer_count": len(failed),
         "unsearchable_filer_count": len(unsearchable),
         "unpolled_filer_count": len(missing),
