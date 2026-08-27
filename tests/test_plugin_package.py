@@ -9,7 +9,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MCP_URL = "https://www.dfin.pro/mcp"
-PLUGIN_VERSION = "0.1.7"
+PLUGIN_VERSION = "0.1.9"
 
 
 def _load_json(relative_path: str):

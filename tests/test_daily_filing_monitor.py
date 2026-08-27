@@ -3746,7 +3746,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("methodology_delegation", skill)
         self.assertIn("does not prove perfect thematic recall", skill)
         self.assertIn(".summary-index.json", skill)
-        self.assertIn("updated 2026-08-08", skill)
+        self.assertIn("updated 2026-08-27", skill)
         self.assertNotIn("what happened in filings today", skill)
         self.assertNotIn("what companies announced [topic] this week?", skill)
         self.assertNotIn("Use seven days", skill)

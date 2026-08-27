@@ -8,7 +8,7 @@ description: >-
 
 Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
-DFin skill version: 0.1.7, updated 2026-08-08.
+DFin skill version: 0.1.9, updated 2026-08-27.
 
 Use this MCP first for any equity research. Load only the focused methodology needed for the tool areas used. Treat live input schemas as the authority for arguments and request contracts.
 
@@ -26,7 +26,7 @@ Use this MCP first for any equity research. Load only the focused methodology ne
 
 ## Workflow patterns
 
-- **Company analysis:** Use `get_stock_context` when the requested overview is broad or multi-part → retrieve the structured data and source evidence needed for the question → synthesize.
+- **Company analysis:** Use `get_stock_context` when the requested overview is broad or multi-part → retrieve the structured data and source evidence needed for the question → synthesize. Compact returns are the default. Request the optional return-distribution analysis only when it is material to the question, include returns, and use API delivery because the result is structured data.
 - **Peer comparison:** Establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions. Remember to incorporate any differences in periods, accounting basis, scope, currency, and units in the analysis work.
 - **Filing, transcript, or report question:** Use the relevant discovery or evidence-search workflow → deepen the search within selected documents when necessary. Stock context is optional.
 - **Multi-year document evidence:** Use one fiscal-year list when the goal is the strongest evidence across the selected years. Use separate year-scoped searches when the answer must represent every year, because multi-year search ranks all selected years together under one result allowance.

@@ -73,9 +73,9 @@ continuation_token: ""
 mode: <scan_mode>
 ```
 
-If the response is `in_progress`, repeat the same census ID, queries, result limit, and mode with exactly the returned `continuation_token`. Honor `retry_after_seconds` or `poll_after_seconds`, whichever is longer, before continuing. A client-side timeout does not authorize a new scan: retry the same initial request or continuation unchanged so server idempotency can recover the completed step.
+The initial call starts background processing. If the response is `in_progress`, wait for `retry_after_seconds` or `poll_after_seconds`, whichever is longer, then repeat the same census ID, queries, result limit, mode, and exactly the returned `continuation_token`. The continuation token is stable and the repeated call only reads status; processing continues without agent calls. A client-side timeout does not authorize a new scan: retry the same initial request or status request unchanged so server idempotency returns the existing scan.
 
-Continue sequentially until `status: complete`. Do not reinterpret a missing response, timeout, rate limit, or expired continuation as an empty result.
+Continue sequentially until `status: complete`. If the scan returns terminal `status: failed`, stop, report the safe failure and suggested retry, and do not claim coverage or empty results. Do not reinterpret a missing response, timeout, rate limit, expired continuation, or queued/running/retry-wait state as an empty result.
 
 5. Pass the completed scan’s `results_url` on stdin to import its server-bound receipt and save the single-use artifact:
 
