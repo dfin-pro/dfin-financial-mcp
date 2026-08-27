@@ -6,11 +6,9 @@ description: >-
 
 # dfin.pro Research
 
-Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
-
 DFin skill version: 0.1.9, updated 2026-08-27.
 
-Use this MCP first for any equity research. Load only the focused methodology needed for the tool areas used. Treat live input schemas as the authority for arguments and request contracts.
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
 
 ## Plan the work
 

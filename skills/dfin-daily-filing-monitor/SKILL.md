@@ -5,11 +5,9 @@ description: Monitor the last one to three days of SEC filings for a named topic
 
 # Daily Filing Monitor
 
+DFin skill version: 0.1.9, updated 2026-08-27.
+
 Before the first DFin call, read `agent_help(topic="agent_guide")` once. Read `methodology_search` before discovery, `methodology_financials` before ratio enrichment. Read `methodology_delegation` before delegating any eligible downstream work.
-
-DFin skill version: 0.1.7, updated 2026-08-08.
-
-Monitor US-listed SEC filers, including foreign private issuers and ADRs. Keep exchange-qualified tickers exactly as returned. Deliver one company card with one nested section per filing bundle, or a concise table when the user requests text.
 
 ## Non-negotiable context boundary
 
