@@ -55,12 +55,17 @@ ALLOWED_FAILURE_REASONS = frozenset(
         "coverage_unknown",
         "internal_document_unavailable",
         "internal_search_unavailable",
+        "internal_and_sec_unavailable",
+        "fast_batch_incomplete",
         "sec_timeout",
         "sec_rate_limited",
         "sec_unavailable",
     }
 )
-BROAD_FAILURE_REASONS = ALLOWED_FAILURE_REASONS - {"unresolved_ticker"}
+BROAD_FAILURE_REASONS = ALLOWED_FAILURE_REASONS - {
+    "unresolved_ticker",
+    "fast_batch_incomplete",
+}
 
 
 class HelperError(Exception):
@@ -1168,6 +1173,7 @@ def _enumeration_state(payload, expected_forms):
         "joint_satisfied": {},
         "failed": {},
         "server_checked": {},
+        "server_incomplete": {},
         "server_scan": None,
         "unexpected": [],
         "unexpected_accessions": [],
@@ -1244,6 +1250,7 @@ def _valid_server_scan(state):
     if isinstance(scan, dict):
         outcomes = scan.get("outcomes")
         checked = state.get("server_checked")
+        incomplete = state.get("server_incomplete")
         failed = state.get("failed")
         known_ciks = set(state.get("filers") or {})
         valid_outcomes = isinstance(outcomes, list) and len(outcomes) == len(known_ciks)
@@ -1256,21 +1263,33 @@ def _valid_server_scan(state):
             status = outcome.get("status") if isinstance(outcome, dict) else None
             reason = outcome.get("reason") if isinstance(outcome, dict) else None
             valid_route = (
-                (coverage_state == "covered" and source == "internal")
-                or (coverage_state == "uncovered" and source == "sec")
+                (
+                    coverage_state == "covered"
+                    and source in {"internal", "sec", "mixed", "none"}
+                )
                 or (
-                    coverage_state == "coverage_unknown"
-                    and source == "none"
-                    and status == "failed"
+                    coverage_state in {"uncovered", "coverage_unknown"}
+                    and source in {"sec", "none"}
+                )
+            ) and (
+                (status == "failed" and source in {"internal", "sec", "mixed", "none"})
+                or (
+                    status == "incomplete"
+                    and source in {"internal", "sec", "mixed", "none"}
+                )
+                or (
+                    status in {"checked_hit", "checked_empty"}
+                    and source in {"internal", "sec", "mixed"}
                 )
             )
             valid_outcomes = valid_outcomes and (
                 cik in known_ciks
                 and cik not in outcome_ciks
                 and valid_route
-                and status in {"checked_hit", "checked_empty", "failed"}
+                and status in {"checked_hit", "checked_empty", "incomplete", "failed"}
                 and (
-                    (status != "failed" and reason is None)
+                    (status in {"checked_hit", "checked_empty"} and reason is None)
+                    or (status == "incomplete" and reason == "fast_batch_incomplete")
                     or (status == "failed" and reason in ALLOWED_FAILURE_REASONS)
                 )
             )
@@ -1288,6 +1307,11 @@ def _valid_server_scan(state):
             for outcome in outcomes or []
             if isinstance(outcome, dict)
         )
+        incomplete_count = sum(
+            outcome.get("status") == "incomplete"
+            for outcome in outcomes or []
+            if isinstance(outcome, dict)
+        )
         expected_checked = {
             outcome["cik"]
             for outcome in outcomes or []
@@ -1299,6 +1323,11 @@ def _valid_server_scan(state):
             for outcome in outcomes or []
             if isinstance(outcome, dict) and outcome.get("status") == "failed"
         }
+        expected_incomplete = {
+            outcome["cik"]
+            for outcome in outcomes or []
+            if isinstance(outcome, dict) and outcome.get("status") == "incomplete"
+        }
         checked_hit = sum(
             isinstance(outcome, dict) and outcome.get("status") == "checked_hit"
             for outcome in outcomes or []
@@ -1307,6 +1336,7 @@ def _valid_server_scan(state):
         expected_complete = (
             state["enumeration"].get("coverage_complete") is True
             and failed_count == 0
+            and incomplete_count == 0
             and checked_count == len(known_ciks)
         )
         rv = (
@@ -1323,14 +1353,23 @@ def _valid_server_scan(state):
             and scan.get("failed_count") == failed_count
             and scan.get("checked") == checked_count
             and scan.get("failed") == failed_count
+            and scan.get("incomplete_count") == incomplete_count
+            and scan.get("incomplete") == incomplete_count
             and scan.get("checked_hit") == checked_hit
             and scan.get("checked_empty") == checked_empty
+            and isinstance(scan.get("results_complete"), bool)
+            and _valid_non_negative_integer(scan.get("delivered_result_count"))
+            and _valid_non_negative_integer(scan.get("omitted_result_count"))
+            and scan.get("result_count") == scan.get("delivered_result_count")
+            and scan.get("results_complete") is (scan.get("omitted_result_count") == 0)
             and scan.get("complete") is expected_complete
             and scan.get("census_complete") is state["enumeration"].get("coverage_complete")
             and scan.get("census_issues") == state["enumeration"].get("issues")
-            and checked_count + failed_count == len(known_ciks)
+            and _valid_recovery_receipt(scan)
+            and checked_count + failed_count + incomplete_count == len(known_ciks)
             and set(checked) == expected_checked
             and set(failed) == expected_failed
+            and set(incomplete) == expected_incomplete
         )
 
     return rv
@@ -1362,6 +1401,100 @@ def _valid_query_receipt(value):
         and isinstance(value.get("query_hash"), str)
         and re.fullmatch(r"[0-9a-f]{64}", value["query_hash"]) is not None
     )
+
+
+def _valid_recovery_receipt(value):
+    """Return whether exact SEC recovery and delivery counters are self-consistent."""
+    integer_fields = (
+        "exact_accessions_queued",
+        "exact_accessions_completed",
+        "exact_accessions_retrying",
+        "exact_accessions_recovered",
+        "exact_accessions_failed",
+        "expected_ingestion_delays",
+        "unexpected_internal_gaps",
+        "unknown_age_gaps",
+        "recovery_batches_completed",
+        "delivered_result_count",
+        "omitted_result_count",
+        "internal_fast_batches_total",
+        "internal_fast_batches_completed",
+        "internal_fast_batches_split",
+        "internal_fast_batches_incomplete",
+        "internal_fast_retries",
+        "internal_fast_query_failures",
+        "internal_fast_documents_total",
+        "internal_fast_documents_searched",
+        "internal_fast_candidates_returned",
+    )
+    valid_integers = all(
+        _valid_non_negative_integer(value.get(field_name))
+        for field_name in integer_fields
+    )
+    internal_failures = value.get("internal_failure_categories")
+    recovery_failures = value.get("sec_recovery_failure_categories")
+    mode = value.get("mode")
+    expected_retrieval_scope = "bounded_candidates" if mode == "fast" else "per_filer"
+    expected_comprehensive = bool(
+        mode == "thorough"
+        and value.get("complete") is True
+        and value.get("results_complete") is True
+    )
+    expected_partial = bool(
+        value.get("failed_count")
+        or value.get("incomplete_count")
+        or value.get("census_complete") is not True
+        or value.get("results_complete") is not True
+    )
+    valid_failure_maps = all(
+        isinstance(failures, dict)
+        and all(
+            FAILURE_REASON_RE.fullmatch(str(reason or "")) is not None
+            and _valid_non_negative_integer(count)
+            for reason, count in failures.items()
+        )
+        for failures in (internal_failures, recovery_failures)
+    )
+    rv = (
+        valid_integers
+        and valid_failure_maps
+        and mode in {"fast", "thorough"}
+        and value.get("retrieval_scope") == expected_retrieval_scope
+        and value.get("negative_findings_supported") is (mode == "thorough")
+        and value.get("comprehensive") is expected_comprehensive
+        and value.get("partial_results") is expected_partial
+        and isinstance(value.get("results_complete"), bool)
+        and value["exact_accessions_retrying"] == 0
+        and value["exact_accessions_completed"] == value["exact_accessions_queued"]
+        and value["exact_accessions_completed"]
+        == value["exact_accessions_recovered"] + value["exact_accessions_failed"]
+        and (
+            value["expected_ingestion_delays"]
+            + value["unexpected_internal_gaps"]
+            + value["unknown_age_gaps"]
+            <= value["exact_accessions_queued"]
+        )
+        and sum(recovery_failures.values()) == value["exact_accessions_failed"]
+        and value["results_complete"] is (value["omitted_result_count"] == 0)
+        and value["internal_fast_documents_searched"]
+        <= value["internal_fast_documents_total"]
+        and (
+            mode == "fast"
+            or all(
+                value[field_name] == 0
+                for field_name in integer_fields
+                if field_name.startswith("internal_fast_")
+            )
+        )
+        and (
+            value.get("recommended_follow_up")
+            == {"mode": "thorough", "reason": "fast_batch_incomplete"}
+            if value.get("incomplete_count")
+            else value.get("recommended_follow_up") is None
+        )
+    )
+
+    return rv
 
 
 def _valid_response_id(value):
@@ -1448,6 +1581,9 @@ def _validate_state(state):
     if "server_checked" not in state:
         state["server_checked"] = {}
 
+    if "server_incomplete" not in state:
+        state["server_incomplete"] = {}
+
     if "server_scan" not in state:
         state["server_scan"] = None
 
@@ -1467,6 +1603,7 @@ def _validate_state(state):
         "joint_satisfied",
         "failed",
         "server_checked",
+        "server_incomplete",
         "included_companions",
         "excluded_post_census",
     )
@@ -1864,6 +2001,7 @@ def _validate_state(state):
     surfaced = set(state["broad_surfaced"])
     checked = set(state["individually_checked"])
     server_checked = set(state["server_checked"])
+    server_incomplete = set(state["server_incomplete"])
     joint_satisfied = set(state["joint_satisfied"])
     failed = set(state["failed"])
 
@@ -1873,6 +2011,9 @@ def _validate_state(state):
         or joint_satisfied & failed
         or server_checked & surfaced or server_checked & checked
         or server_checked & joint_satisfied or server_checked & failed
+        or server_incomplete & surfaced or server_incomplete & checked
+        or server_incomplete & joint_satisfied or server_incomplete & failed
+        or server_incomplete & server_checked
     ):
         raise HelperError("Coverage filer statuses must be mutually exclusive.")
 
@@ -1880,10 +2021,20 @@ def _validate_state(state):
         cik not in known_ciks
         or not isinstance(receipt, dict)
         or receipt.get("status") not in {"checked_hit", "checked_empty"}
-        or receipt.get("source") not in {"internal", "sec"}
+        or receipt.get("source") not in {"internal", "sec", "mixed"}
         for cik, receipt in state["server_checked"].items()
     ):
         raise HelperError("The coverage state contains an invalid server-checked filer.")
+
+    if any(
+        cik not in known_ciks
+        or not isinstance(receipt, dict)
+        or receipt.get("status") != "incomplete"
+        or receipt.get("reason") != "fast_batch_incomplete"
+        or receipt.get("source") not in {"internal", "sec", "mixed", "none"}
+        for cik, receipt in state["server_incomplete"].items()
+    ):
+        raise HelperError("The coverage state contains an invalid incomplete filer.")
 
     for target_cik, joint in state["joint_satisfied"].items():
         source_cik = joint.get("source_cik") if isinstance(joint, dict) else None
@@ -1935,6 +2086,7 @@ def reset_searches(state):
     state["joint_satisfied"] = {}
     state["failed"] = {}
     state["server_checked"] = {}
+    state["server_incomplete"] = {}
     state["server_scan"] = None
     state["unexpected"] = []
     state["unexpected_accessions"] = []
@@ -2381,9 +2533,16 @@ def _missing_ciks(state):
     checked = set(state["individually_checked"])
     joint_satisfied = set(state["joint_satisfied"])
     server_checked = set(state.get("server_checked") or {})
+    server_incomplete = set(state.get("server_incomplete") or {})
     failed = set(state["failed"])
     return sorted(
-        expected - surfaced - checked - joint_satisfied - server_checked - failed
+        expected
+        - surfaced
+        - checked
+        - joint_satisfied
+        - server_checked
+        - server_incomplete
+        - failed
     )
 
 
@@ -2700,7 +2859,9 @@ def mark_filer(
     return (cik, eligible_results) if return_eligible else cik
 
 
-def import_server_scan(state, artifact_path, queries, results_per_query):
+def import_server_scan(
+    state, artifact_path, queries, results_per_query, *, mode="thorough"
+):
     """Validate and import one complete server-bound census search receipt."""
     _validate_state(state)
 
@@ -2714,6 +2875,7 @@ def import_server_scan(state, artifact_path, queries, results_per_query):
             state["individually_checked"],
             state["joint_satisfied"],
             state["failed"],
+            state["server_incomplete"],
         )
     ):
         raise HelperError(
@@ -2740,6 +2902,9 @@ def import_server_scan(state, artifact_path, queries, results_per_query):
         or not 1 <= results_per_query <= 25
     ):
         raise HelperError("--results-per-query must be between 1 and 25.")
+
+    if mode not in {"fast", "thorough"}:
+        raise HelperError("--mode must be fast or thorough.")
 
     payload = _load_json_value(artifact_path)
     results, result_count, response_id, artifact_id = load_search_response(artifact_path)
@@ -2773,10 +2938,15 @@ def import_server_scan(state, artifact_path, queries, results_per_query):
         isinstance(outcome, dict) and outcome.get("status") == "failed"
         for outcome in outcomes
     )
+    incomplete_count = sum(
+        isinstance(outcome, dict) and outcome.get("status") == "incomplete"
+        for outcome in outcomes
+    )
     checked_count = checked_hit + checked_empty
     expected_complete = (
         state["enumeration"].get("coverage_complete") is True
         and failed_count == 0
+        and incomplete_count == 0
         and checked_count == len(state["filers"])
     )
 
@@ -2788,13 +2958,21 @@ def import_server_scan(state, artifact_path, queries, results_per_query):
         and coverage.get("checked_empty") == checked_empty
         and coverage.get("failed_count") == failed_count
         and coverage.get("failed") == failed_count
-        and checked_count + failed_count == len(state["filers"])
+        and coverage.get("incomplete_count") == incomplete_count
+        and coverage.get("incomplete") == incomplete_count
+        and checked_count + failed_count + incomplete_count == len(state["filers"])
+        and coverage.get("mode") == mode
         and coverage.get("complete") is expected_complete
         and coverage.get("census_complete") is state["enumeration"].get("coverage_complete")
         and coverage.get("census_issues") == state["enumeration"].get("issues")
         and coverage.get("date_from") == state["scope"].get("date_from")
         and coverage.get("date_to") == state["scope"].get("date_to")
         and coverage.get("filing_types") == state["scope"].get("expected_forms")
+        and _valid_recovery_receipt(coverage)
+        and payload.get("results_complete") is coverage.get("results_complete")
+        and payload.get("delivered_result_count") == result_count
+        and payload.get("delivered_result_count") == coverage.get("delivered_result_count")
+        and payload.get("omitted_result_count") == coverage.get("omitted_result_count")
     ):
         raise HelperError("The server receipt has inconsistent census coverage arithmetic.")
 
@@ -2814,6 +2992,13 @@ def import_server_scan(state, artifact_path, queries, results_per_query):
         elif status == "failed":
             state["failed"][cik] = {
                 "ticker": state["filers"][cik].get("search_ticker"),
+                "reason": outcome.get("reason"),
+            }
+
+        elif status == "incomplete":
+            state["server_incomplete"][cik] = {
+                "source": outcome.get("source"),
+                "status": status,
                 "reason": outcome.get("reason"),
             }
 
@@ -2858,11 +3043,42 @@ def import_server_scan(state, artifact_path, queries, results_per_query):
         "failed_count": coverage.get("failed_count"),
         "checked": coverage.get("checked"),
         "failed": coverage.get("failed"),
+        "incomplete_count": coverage.get("incomplete_count"),
+        "incomplete": coverage.get("incomplete"),
         "complete": coverage.get("complete"),
         "census_complete": coverage.get("census_complete"),
         "census_issues": coverage.get("census_issues"),
         "checked_hit": coverage.get("checked_hit"),
         "checked_empty": coverage.get("checked_empty"),
+        "results_complete": coverage.get("results_complete"),
+        "delivered_result_count": coverage.get("delivered_result_count"),
+        "omitted_result_count": coverage.get("omitted_result_count"),
+        "mode": coverage.get("mode"),
+        "retrieval_scope": coverage.get("retrieval_scope"),
+        "negative_findings_supported": coverage.get("negative_findings_supported"),
+        "partial_results": coverage.get("partial_results"),
+        "comprehensive": coverage.get("comprehensive"),
+        "recommended_follow_up": coverage.get("recommended_follow_up"),
+        "internal_fast_batches_total": coverage.get("internal_fast_batches_total"),
+        "internal_fast_batches_completed": coverage.get("internal_fast_batches_completed"),
+        "internal_fast_batches_split": coverage.get("internal_fast_batches_split"),
+        "internal_fast_batches_incomplete": coverage.get("internal_fast_batches_incomplete"),
+        "internal_fast_retries": coverage.get("internal_fast_retries"),
+        "internal_fast_query_failures": coverage.get("internal_fast_query_failures"),
+        "internal_fast_documents_total": coverage.get("internal_fast_documents_total"),
+        "internal_fast_documents_searched": coverage.get("internal_fast_documents_searched"),
+        "internal_fast_candidates_returned": coverage.get("internal_fast_candidates_returned"),
+        "exact_accessions_queued": coverage.get("exact_accessions_queued"),
+        "exact_accessions_completed": coverage.get("exact_accessions_completed"),
+        "exact_accessions_retrying": coverage.get("exact_accessions_retrying"),
+        "exact_accessions_recovered": coverage.get("exact_accessions_recovered"),
+        "exact_accessions_failed": coverage.get("exact_accessions_failed"),
+        "expected_ingestion_delays": coverage.get("expected_ingestion_delays"),
+        "unexpected_internal_gaps": coverage.get("unexpected_internal_gaps"),
+        "unknown_age_gaps": coverage.get("unknown_age_gaps"),
+        "internal_failure_categories": coverage.get("internal_failure_categories"),
+        "sec_recovery_failure_categories": coverage.get("sec_recovery_failure_categories"),
+        "recovery_batches_completed": coverage.get("recovery_batches_completed"),
         "outcomes": outcomes,
     }
     state["consumed_responses"][response_id] = "server_scan"
@@ -2882,7 +3098,9 @@ def coverage_audit(state):
     warnings = []
     accession_count = len(state["accessions"])
     server_outcome_ciks = (
-        set(state.get("server_checked") or {}) | set(state.get("failed") or {})
+        set(state.get("server_checked") or {})
+        | set(state.get("server_incomplete") or {})
+        | set(state.get("failed") or {})
         if state.get("server_scan") is not None
         else set()
     )
@@ -2948,6 +3166,12 @@ def coverage_audit(state):
 
     server_bound = state.get("server_scan") is not None
 
+    if server_bound and state["server_scan"].get("results_complete") is not True:
+        _append_unique(inconsistencies, "result_delivery_incomplete")
+
+    if server_bound and state.get("server_incomplete"):
+        _append_unique(inconsistencies, "fast_scan_incomplete")
+
     if state["broad_failures"]:
         _append_unique(inconsistencies, "broad_search_failed")
 
@@ -2983,11 +3207,19 @@ def coverage_audit(state):
         if _qualified_ticker(filer.get("search_ticker")) is None
         and cik not in state["broad_surfaced"]
         and cik not in state.get("server_checked", {})
+        and cik not in state.get("server_incomplete", {})
         and (not server_bound or cik not in state["failed"])
     )
     missing = _missing_ciks(state)
     failed = sorted(state["failed"])
-    complete = not inconsistencies and not unsearchable and not missing and not failed
+    incomplete = sorted(state.get("server_incomplete") or {})
+    complete = (
+        not inconsistencies
+        and not unsearchable
+        and not missing
+        and not failed
+        and not incomplete
+    )
     output = {
         "complete": complete,
         "census_fingerprint": state["census_fingerprint"],
@@ -3006,6 +3238,42 @@ def coverage_audit(state):
         "broad_search_filer_count": len(set(state["broad_surfaced"])),
         "individually_checked_filer_count": len(state["individually_checked"]),
         "server_checked_filer_count": len(state.get("server_checked") or {}),
+        "incomplete_filer_count": len(incomplete),
+        "mode": state["server_scan"].get("mode") if server_bound else None,
+        "retrieval_scope": (
+            state["server_scan"].get("retrieval_scope") if server_bound else None
+        ),
+        "negative_findings_supported": (
+            state["server_scan"].get("negative_findings_supported")
+            if server_bound
+            else None
+        ),
+        "comprehensive": (
+            state["server_scan"].get("comprehensive") if server_bound else complete
+        ),
+        "recommended_follow_up": (
+            state["server_scan"].get("recommended_follow_up")
+            if server_bound
+            else None
+        ),
+        "partial_results": (
+            state["server_scan"].get("partial_results") if server_bound else not complete
+        ),
+        "results_complete": (
+            state["server_scan"].get("results_complete")
+            if server_bound
+            else None
+        ),
+        "delivered_result_count": (
+            state["server_scan"].get("delivered_result_count")
+            if server_bound
+            else None
+        ),
+        "omitted_result_count": (
+            state["server_scan"].get("omitted_result_count")
+            if server_bound
+            else None
+        ),
         "joint_satisfied_filer_count": len(state["joint_satisfied"]),
         "failed_filer_count": len(failed),
         "unsearchable_filer_count": len(unsearchable),
@@ -3296,6 +3564,9 @@ def _argument_parser():
     coverage_import_scan.add_argument("--save", type=Path)
     coverage_import_scan.add_argument("--query", action="append", required=True)
     coverage_import_scan.add_argument(
+        "--mode", choices=("fast", "thorough"), default="thorough"
+    )
+    coverage_import_scan.add_argument(
         "--results-per-query",
         type=int,
         default=5,
@@ -3539,6 +3810,7 @@ def main(argv=None):
                 artifact_path,
                 arguments.query,
                 arguments.results_per_query,
+                mode=arguments.mode,
             )
             _write_state(arguments.state, state)
             results, _count, response_id, artifact_id = load_search_response(artifact_path)
@@ -3556,6 +3828,10 @@ def main(argv=None):
                 "eligible_result_count": len(eligible_results),
                 "checked_filer_count": len(state["server_checked"]),
                 "failed_filer_count": len(state["failed"]),
+                "incomplete_filer_count": len(state["server_incomplete"]),
+                "recommended_follow_up": state["server_scan"].get(
+                    "recommended_follow_up"
+                ),
                 "missing_filer_count": len(_missing_ciks(state)),
                 "included_companion_filing_count": len(state["included_companions"]),
                 "summary_index_available": True,

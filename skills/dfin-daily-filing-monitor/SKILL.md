@@ -5,7 +5,7 @@ description: Monitor the last one to three days of SEC filings for a named topic
 
 # Daily Filing Monitor
 
-Before the first DFin call, read `agent_help(topic="agent_guide")` once. Read `methodology_search` before discovery, `methodology_financials` before ratio enrichment, and `output_guidelines` before presenting substantive results. Read `methodology_delegation` before delegating any eligible downstream work.
+Before the first DFin call, read `agent_help(topic="agent_guide")` once. Read `methodology_search` before discovery, `methodology_financials` before ratio enrichment. Read `methodology_delegation` before delegating any eligible downstream work.
 
 DFin skill version: 0.1.7, updated 2026-08-08.
 
@@ -18,17 +18,19 @@ Monitor US-listed SEC filers, including foreign private issuers and ADRs. Keep e
 - Keep census and filing-search delivery on `api`. Download artifacts only into local helpers and never read a complete artifact into model context.
 - A non-empty census is searched only with `search_filing_census`. Do not run broad `search_filings` calls or ticker-by-ticker reconciliation.
 - Call `search_filing_census` sequentially. Do not delegate it or issue concurrent continuations.
+- Set `scan_mode` to `fast` by default. Set it to `thorough` when the user explicitly requests exhaustive per-filer review or needs a comprehensive/no-match conclusion. An audited scan is `complete` only when its census and delivered results are complete and every frozen filer is checked with no incomplete or failed outcome; it is `comprehensive` only when this is true for a thorough scan. A clean fast scan can be complete but is never comprehensive.
 - Request stock context in stable bounded batches and pass complete responses or capability URLs directly to the dashboard helper.
 - Use `scripts/filing_artifact.py` for census initialization, server-receipt import, summaries, selection, and audit. Use `scripts/build_dashboard.py` for enrichment assembly and output.
 
 ## 1. Route the request
 
-Extract the topic, date window, requested forms, sector filter, and output mode. Require one named event, theme, or evidence target. If the skill is explicitly invoked without one, ask for one monitoring theme and make no DFin calls.
+Extract the topic, date window, requested forms, sector filter, output mode, and `scan_mode`. Require one named event, theme, or evidence target. If the skill is explicitly invoked without one, ask for one monitoring theme and make no DFin calls.
 
 - Default to the last two SEC filing-calendar days and use one day for “today.”
 - Accept inclusive windows of one to three calendar days. For longer windows, ask the user to narrow the request and make no DFin calls.
 - Honor explicit forms exactly. Otherwise select a defensible topic-specific SEC form universe before enumeration. Current reports are a starting point, not a universal answer.
 - Use dashboard mode by default. Use text mode for “no dashboard,” “just list them,” “just text,” or equivalent.
+- Select `scan_mode: thorough` for an explicit exhaustive review or a requested definitive no-match conclusion; otherwise use `scan_mode: fast`.
 
 ## 2. Enumerate and search the frozen census
 
@@ -68,19 +70,20 @@ census_result_set_id: <result_set_id from the one enumeration call>
 queries: <exact finalized query array>
 results_per_query: 5
 continuation_token: ""
+mode: <scan_mode>
 ```
 
-If the response is `in_progress`, repeat the same census ID, queries, and result limit with exactly the returned `continuation_token`. Honor `retry_after_seconds` before continuing. A client-side timeout does not authorize a new scan: retry the same initial request or continuation unchanged so server idempotency can recover the completed step.
+If the response is `in_progress`, repeat the same census ID, queries, result limit, and mode with exactly the returned `continuation_token`. Honor `retry_after_seconds` or `poll_after_seconds`, whichever is longer, before continuing. A client-side timeout does not authorize a new scan: retry the same initial request or continuation unchanged so server idempotency can recover the completed step.
 
 Continue sequentially until `status: complete`. Do not reinterpret a missing response, timeout, rate limit, or expired continuation as an empty result.
 
 5. Pass the completed scan’s `results_url` on stdin to import its server-bound receipt and save the single-use artifact:
 
 ```text
-python3 <skill-dir>/scripts/filing_artifact.py coverage-import-scan --state <coverage-state-path> --fetch --save <scan-json-path> --query "<query 1>" [--query "<query 2>" ...] --results-per-query 5
+python3 <skill-dir>/scripts/filing_artifact.py coverage-import-scan --state <coverage-state-path> --fetch --save <scan-json-path> --query "<query 1>" [--query "<query 2>" ...] --results-per-query 5 --mode <scan_mode>
 ```
 
-The helper validates the census fingerprint, exact query binding, issuer routes, result identities, and `total_filers = checked + failed`. It records `checked_empty` as successful coverage and emits bounded eligible summaries. Page those summaries locally with `summarize --state <coverage-state-path> --artifact <scan-json-path> --offset <next offset>`; the `.summary-index.json` sidecar prevents reopening the full artifact.
+Use the same selected mode in the request and import command. The helper validates the census fingerprint, exact query binding, internal, SEC, and mixed source routes, exact-recovery counters, result identities, `total_filers = checked + failed + incomplete`, and result-delivery arithmetic. It records checked and incomplete outcomes separately and emits bounded eligible summaries. Page those summaries locally with `summarize --state <coverage-state-path> --artifact <scan-json-path> --offset <next offset>`; the `.summary-index.json` sidecar prevents reopening the full artifact.
 
 6. Run the audit before enrichment:
 
@@ -88,12 +91,14 @@ The helper validates the census fingerprint, exact query binding, issuer routes,
 python3 <skill-dir>/scripts/filing_artifact.py coverage-audit --state <coverage-state-path>
 ```
 
-An incomplete census, `coverage_unknown`, missing internal document, internal search failure, exhausted SEC timeout/rate limit, malformed receipt, or any unpolled filer blocks comprehensive coverage. Never turn those failures into no-match conclusions. Delete all census, state, scan, sidecar, and evidence files after the final result.
+Fast mode searches the frozen filing corpus in large diversified batches and returns bounded candidates; it is suitable for finding and classifying likely events, but its clean completion does not support a comprehensive no-match conclusion. An incomplete fast batch, incomplete census, failed exact SEC recovery, malformed receipt, any unpolled filer, or `results_complete: false` also blocks comprehensive conclusions. When a comprehensive conclusion is required after a fast scan, initialize a new coverage-state path from the saved census artifact with the same expected forms, retain the exact query array and `results_per_query`, and start and import a `thorough` scan against the same frozen census. Do not call `list_latest_filings` again or reuse the fast scan's coverage state, which is already bound to its completed server receipt. A receipt's `recommended_follow_up` is a mandatory signal to take this path for a comprehensive request, not the only reason to do so. Delete all census, state, scan, sidecar, and evidence files after the final result.
 
 ### Identity and source rules
 
 - CIK is the authoritative coverage identity; preserve every ticker alias returned by the census.
-- Covered CIKs are searched only in DFin. Explicitly uncovered CIKs are searched only through SEC. Unknown coverage fails closed.
+- Covered CIKs start in DFin. When the live census permits external access, a frozen accession that is missing or fails internally is recovered by exact CIK/accession identity from its SEC complete submission; a filer may therefore finish with `internal`, `sec`, or `mixed` source. Explicitly uncovered frozen accessions use the same exact SEC submission path. This recovery does not run SEC full-text discovery and cannot add out-of-census accessions.
+- Treat `checked_hit` and `checked_empty` as successful only after every frozen accession associated with that filer was searched. `internal_and_sec_unavailable` means at least one accession remained unavailable even if the artifact retains partial evidence from the filer.
+- Exact recovery searches supported primary and textual exhibit sections. Unsupported potentially substantive binary attachments cause failed coverage rather than being silently ignored.
 - Use CIK plus SEC accession as the filing bundle identity; fall back to `doc_uuid` only when no accession exists.
 - Preserve every issuer association on joint accessions. Coverage bookkeeping does not automatically attribute an event to every co-filer.
 - Same-CIK companion accessions may be included and labeled. Results for CIKs outside the frozen census are excluded.
@@ -113,7 +118,7 @@ For only the top 3–5 plausible cover-page-only bundles, select the bundle loca
 python3 <skill-dir>/scripts/filing_artifact.py select --artifact <scan-json-path> --bundle <bundle-id>
 ```
 
-Call `search_in_documents` with one tight query, at most 20 UUIDs, `results_per_query: 3`, and `delivery: api`; pass the result to `summarize --fetch --save`. Stop as soon as classification is possible. Retrieve a known chunk only when bounded evidence ends at a material boundary. Never walk neighboring chunks or fetch an entire document speculatively.
+Call `search_in_documents` with one tight query, at most 20 UUIDs, `results_per_query: 3`, `max_results_per_doc_uuid: 3`, and `delivery: api`; pass the result to `summarize --fetch --save`. Stop as soon as classification is possible. Retrieve a known chunk only when bounded evidence ends at a material boundary. Never walk neighboring chunks or fetch an entire document speculatively.
 
 ## 4. Enrich selected companies
 
@@ -148,8 +153,8 @@ Render the completed HTML when a verified renderer is available. Otherwise link 
 
 Read `output_guidelines` before presenting substantive results.
 
-- Report selected forms, frozen accession/filer counts, internally checked covered filers, SEC-checked uncovered filers, failures, companion count, `coverage.as_of`, coverage issues, and the most significant event.
+- Report the scan mode and retrieval scope; selected forms; frozen accession/filer counts; checked, incomplete, and failed filer counts; companion count; result-delivery completeness; whether the receipt is comprehensive; `coverage.as_of`; coverage issues; and the most significant event. Do not claim source breakdowns or recovery counters that the audit does not return.
 - In text mode, use `Ticker | Company | Event | Price (Δ) | 1Y | Filing`; mark doubtful bundles `⚑ flagged`.
-- Say no relevant results were found only when `coverage-audit` is complete. Otherwise say no matches were found in an incomplete scan and name the unresolved issue.
-- Phrase completeness narrowly: every issuer in the one frozen census has a server-bound checked or failed outcome. This does not prove perfect thematic recall for image-only content or unavailable exhibits.
+- Say no relevant results were found only when `coverage-audit` reports `comprehensive: true`. A complete fast scan may report its observed matches, but it cannot support a no-match conclusion. Otherwise say no matches were surfaced by the bounded scan and name the limitation or unresolved issue.
+- Phrase completeness narrowly: every issuer in the one frozen census has a server-bound checked, incomplete, or failed outcome. This does not prove perfect thematic recall for image-only content or unavailable exhibits.
 - Never reproduce filing chunks, complete descriptions, capability identifiers, or dashboard details already rendered elsewhere.

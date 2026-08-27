@@ -59,7 +59,9 @@ class FakeResponse:
         return self.body
 
 
-def _server_scan_payload(state, *, results=None, status="checked_hit", reason=None):
+def _server_scan_payload(
+    state, *, results=None, status="checked_hit", reason=None, mode="thorough"
+):
     """Build one helper-compatible server-bound census receipt."""
     results = [] if results is None else results
     cik = next(iter(state["filers"]))
@@ -74,11 +76,23 @@ def _server_scan_payload(state, *, results=None, status="checked_hit", reason=No
         outcome["reason"] = reason
 
     failed_count = int(status == "failed")
-    checked_count = 1 - failed_count
+    incomplete_count = int(status == "incomplete")
+    checked_count = 1 - failed_count - incomplete_count
+    complete = failed_count == 0 and incomplete_count == 0
     return {
         "count": len(results),
+        "results_complete": True,
+        "delivered_result_count": len(results),
+        "omitted_result_count": 0,
         "coverage": {
-            "complete": failed_count == 0,
+            "complete": complete,
+            "mode": mode,
+            "retrieval_scope": (
+                "bounded_candidates" if mode == "fast" else "per_filer"
+            ),
+            "negative_findings_supported": mode == "thorough",
+            "partial_results": not complete,
+            "comprehensive": mode == "thorough" and complete,
             "request_binding": "server_bound",
             "census_fingerprint": FILING._server_census_fingerprint(state),
             "query_hash": FILING._server_query_hash(THEMATIC_QUERIES, 5),
@@ -94,6 +108,31 @@ def _server_scan_payload(state, *, results=None, status="checked_hit", reason=No
             "checked_empty": int(status == "checked_empty"),
             "failed_count": failed_count,
             "failed": failed_count,
+            "incomplete_count": incomplete_count,
+            "incomplete": incomplete_count,
+            "results_complete": True,
+            "delivered_result_count": len(results),
+            "omitted_result_count": 0,
+            "exact_accessions_queued": 0,
+            "exact_accessions_completed": 0,
+            "exact_accessions_retrying": 0,
+            "exact_accessions_recovered": 0,
+            "exact_accessions_failed": 0,
+            "expected_ingestion_delays": 0,
+            "unexpected_internal_gaps": 0,
+            "unknown_age_gaps": 0,
+            "internal_failure_categories": {},
+            "sec_recovery_failure_categories": {},
+            "recovery_batches_completed": 0,
+            "internal_fast_batches_total": 0,
+            "internal_fast_batches_completed": 0,
+            "internal_fast_batches_split": 0,
+            "internal_fast_batches_incomplete": 0,
+            "internal_fast_retries": 0,
+            "internal_fast_query_failures": 0,
+            "internal_fast_documents_total": 0,
+            "internal_fast_documents_searched": 0,
+            "internal_fast_candidates_returned": 0,
             "outcomes": [outcome],
         },
         "results": results,
@@ -2630,6 +2669,67 @@ class ServerBoundCensusImportTests(unittest.TestCase):
                     THEMATIC_QUERIES,
                     5,
                 )
+
+    def test_import_server_scan_accepts_mixed_recovery_and_blocks_truncated_delivery(self):
+        """Accept mixed-source coverage but refuse comprehensive truncated conclusions."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        payload = _server_scan_payload(state, status="checked_empty")
+        payload["coverage"]["outcomes"][0]["source"] = "mixed"
+        payload["results_complete"] = False
+        payload["omitted_result_count"] = 2
+        payload["coverage"]["results_complete"] = False
+        payload["coverage"]["omitted_result_count"] = 2
+        payload["coverage"]["partial_results"] = True
+        payload["coverage"]["comprehensive"] = False
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            FILING.import_server_scan(state, artifact_path, THEMATIC_QUERIES, 5)
+
+        audit = FILING.coverage_audit(state)
+        self.assertFalse(audit["complete"])
+        self.assertFalse(audit["results_complete"])
+        self.assertIn("result_delivery_incomplete", audit["inconsistencies"])
+
+    def test_import_fast_scan_preserves_incomplete_outcome_and_blocks_negative_claim(self):
+        """Keep bounded fast gaps distinct from checked and failed outcomes."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        payload = _server_scan_payload(
+            state,
+            status="incomplete",
+            reason="fast_batch_incomplete",
+            mode="fast",
+        )
+        payload["coverage"]["recommended_follow_up"] = {
+            "mode": "thorough",
+            "reason": "fast_batch_incomplete",
+        }
+        payload["coverage"]["outcomes"][0]["source"] = "none"
+        payload["coverage"]["internal_fast_batches_total"] = 1
+        payload["coverage"]["internal_fast_batches_incomplete"] = 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+                mode="fast",
+            )
+
+        audit = FILING.coverage_audit(state)
+        self.assertFalse(audit["complete"])
+        self.assertFalse(audit["comprehensive"])
+        self.assertFalse(audit["negative_findings_supported"])
+        self.assertEqual(audit["incomplete_filer_count"], 1)
+        self.assertEqual(
+            audit["recommended_follow_up"],
+            {"mode": "thorough", "reason": "fast_batch_incomplete"},
+        )
+        self.assertEqual(audit["unpolled_filer_count"], 0)
 
 
 class DashboardBuilderTests(unittest.TestCase):
