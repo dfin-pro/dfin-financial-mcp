@@ -76,65 +76,116 @@ def _server_scan_payload(
         outcome["reason"] = reason
 
     failed_count = int(status == "failed")
+    not_checked_count = int(status == "not_checked")
     incomplete_count = int(status == "incomplete")
-    checked_count = 1 - failed_count - incomplete_count
-    complete = failed_count == 0 and incomplete_count == 0
+    checked_count = 1 - failed_count - not_checked_count - incomplete_count
+    complete = (
+        failed_count == 0
+        and not_checked_count == 0
+        and incomplete_count == 0
+    )
+    candidate_filer_count = int(bool(results))
+    sources = {
+        "internal": int(outcome["source"] == "internal"),
+        "sec": int(outcome["source"] == "sec"),
+        "mixed": int(outcome["source"] == "mixed"),
+        "none": int(outcome["source"] == "none"),
+    }
+
+    if mode == "fast":
+        sources["sec_fts"] = int(outcome["source"] == "sec_fts")
+
+    coverage = {
+        "scan_id": "a" * 32,
+        "complete": complete,
+        "mode": mode,
+        "retrieval_scope": (
+            "bounded_candidates" if mode == "fast" else "per_filer"
+        ),
+        "negative_findings_supported": mode == "thorough",
+        "partial_results": not complete,
+        "comprehensive": mode == "thorough" and complete,
+        "request_binding": "server_bound",
+        "census_fingerprint": FILING._server_census_fingerprint(state),
+        "query_hash": FILING._server_query_hash(THEMATIC_QUERIES, 5),
+        "date_from": state["scope"]["date_from"],
+        "date_to": state["scope"]["date_to"],
+        "filing_types": state["scope"]["expected_forms"],
+        "census_complete": state["enumeration"]["coverage_complete"],
+        "census_issues": state["enumeration"]["issues"],
+        "total_filers": 1,
+        "checked_count": checked_count,
+        "checked": checked_count,
+        "checked_hit": int(status == "checked_hit"),
+        "checked_empty": int(status == "checked_empty"),
+        "candidate_filer_count": candidate_filer_count,
+        "candidate_count": len(results),
+        "not_checked_count": not_checked_count,
+        "not_checked": not_checked_count,
+        "failed_count": failed_count,
+        "failed": failed_count,
+        "incomplete_count": incomplete_count,
+        "incomplete": incomplete_count,
+        "sources": sources,
+        "results_complete": True,
+        "delivered_result_count": len(results),
+        "omitted_result_count": 0,
+        "exact_accessions_queued": 0,
+        "exact_accessions_completed": 0,
+        "exact_accessions_retrying": 0,
+        "exact_accessions_recovered": 0,
+        "exact_accessions_failed": 0,
+        "expected_ingestion_delays": 0,
+        "unexpected_internal_gaps": 0,
+        "unknown_age_gaps": 0,
+        "internal_failure_categories": {},
+        "sec_recovery_failure_categories": {},
+        "recovery_issues": [],
+        "recovery_scope": {
+            "policy": "sec_document_format_html",
+            "indexes_read": 0,
+            "html_documents_selected": 0,
+            "non_html_document_rows_skipped": 0,
+            "data_file_rows_skipped": 0,
+        },
+        "outcomes": [outcome],
+    }
+
+    if mode == "fast":
+        coverage["sec_fts"] = {
+            "search_status": "complete",
+            "index_freshness": "not_guaranteed",
+            "queries_total": len(THEMATIC_QUERIES),
+            "queries_completed": len(THEMATIC_QUERIES),
+            "queries_failed": 0,
+            "queries_truncated": 0,
+            "pages_completed": len(THEMATIC_QUERIES),
+            "raw_hits_examined": 0,
+            "in_census_candidates": 0,
+            "retained_candidates": 0,
+            "locator_failures": 0,
+            "discarded_hits": {
+                "outside_frozen_census": 0,
+                "non_html_attachments": 0,
+                "metadata_conflicts": 0,
+                "unsafe_metadata": 0,
+            },
+        }
+        coverage["search_issues"] = []
+
+    if incomplete_count:
+        coverage["recommended_follow_up"] = {
+            "mode": "thorough",
+            "reason": "fast_batch_incomplete",
+        }
+
     return {
+        "scan_id": "a" * 32,
         "count": len(results),
         "results_complete": True,
         "delivered_result_count": len(results),
         "omitted_result_count": 0,
-        "coverage": {
-            "complete": complete,
-            "mode": mode,
-            "retrieval_scope": (
-                "bounded_candidates" if mode == "fast" else "per_filer"
-            ),
-            "negative_findings_supported": mode == "thorough",
-            "partial_results": not complete,
-            "comprehensive": mode == "thorough" and complete,
-            "request_binding": "server_bound",
-            "census_fingerprint": FILING._server_census_fingerprint(state),
-            "query_hash": FILING._server_query_hash(THEMATIC_QUERIES, 5),
-            "date_from": state["scope"]["date_from"],
-            "date_to": state["scope"]["date_to"],
-            "filing_types": state["scope"]["expected_forms"],
-            "census_complete": state["enumeration"]["coverage_complete"],
-            "census_issues": state["enumeration"]["issues"],
-            "total_filers": 1,
-            "checked_count": checked_count,
-            "checked": checked_count,
-            "checked_hit": int(status == "checked_hit"),
-            "checked_empty": int(status == "checked_empty"),
-            "failed_count": failed_count,
-            "failed": failed_count,
-            "incomplete_count": incomplete_count,
-            "incomplete": incomplete_count,
-            "results_complete": True,
-            "delivered_result_count": len(results),
-            "omitted_result_count": 0,
-            "exact_accessions_queued": 0,
-            "exact_accessions_completed": 0,
-            "exact_accessions_retrying": 0,
-            "exact_accessions_recovered": 0,
-            "exact_accessions_failed": 0,
-            "expected_ingestion_delays": 0,
-            "unexpected_internal_gaps": 0,
-            "unknown_age_gaps": 0,
-            "internal_failure_categories": {},
-            "sec_recovery_failure_categories": {},
-            "recovery_batches_completed": 0,
-            "internal_fast_batches_total": 0,
-            "internal_fast_batches_completed": 0,
-            "internal_fast_batches_split": 0,
-            "internal_fast_batches_incomplete": 0,
-            "internal_fast_retries": 0,
-            "internal_fast_query_failures": 0,
-            "internal_fast_documents_total": 0,
-            "internal_fast_documents_searched": 0,
-            "internal_fast_candidates_returned": 0,
-            "outcomes": [outcome],
-        },
+        "coverage": coverage,
         "results": results,
     }
 
@@ -2675,10 +2726,13 @@ class ServerBoundCensusImportTests(unittest.TestCase):
         state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
         payload = _server_scan_payload(state, status="checked_empty")
         payload["coverage"]["outcomes"][0]["source"] = "mixed"
+        payload["coverage"]["sources"]["internal"] = 0
+        payload["coverage"]["sources"]["mixed"] = 1
         payload["results_complete"] = False
         payload["omitted_result_count"] = 2
         payload["coverage"]["results_complete"] = False
         payload["coverage"]["omitted_result_count"] = 2
+        payload["coverage"]["candidate_count"] = 2
         payload["coverage"]["partial_results"] = True
         payload["coverage"]["comprehensive"] = False
 
@@ -2706,8 +2760,8 @@ class ServerBoundCensusImportTests(unittest.TestCase):
             "reason": "fast_batch_incomplete",
         }
         payload["coverage"]["outcomes"][0]["source"] = "none"
-        payload["coverage"]["internal_fast_batches_total"] = 1
-        payload["coverage"]["internal_fast_batches_incomplete"] = 1
+        payload["coverage"]["sources"]["internal"] = 0
+        payload["coverage"]["sources"]["none"] = 1
 
         with tempfile.TemporaryDirectory() as directory:
             artifact_path = Path(directory) / "scan.json"
@@ -2730,6 +2784,182 @@ class ServerBoundCensusImportTests(unittest.TestCase):
             {"mode": "thorough", "reason": "fast_batch_incomplete"},
         )
         self.assertEqual(audit["unpolled_filer_count"], 0)
+
+    def test_import_fast_scan_keeps_sec_fts_candidate_separate_from_not_checked(self):
+        """Preserve useful external candidates without converting them into coverage."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        result = _filing_result(content="")
+        result.update({
+            "scan_cik": "0000789019",
+            "scan_source": "sec_fts",
+            "match_basis": "sec_full_text_index",
+            "evidence_status": "metadata_only",
+            "attachment_type": "EX-10.1",
+            "file_name": "credit-agreement.htm",
+            "companion": False,
+        })
+        result.pop("content", None)
+        payload = _server_scan_payload(
+            state,
+            results=[result],
+            status="not_checked",
+            reason="not_available_in_local_index",
+            mode="fast",
+        )
+        payload["coverage"]["outcomes"][0]["source"] = "sec_fts"
+        payload["coverage"]["sources"]["internal"] = 0
+        payload["coverage"]["sources"]["sec_fts"] = 1
+        payload["coverage"]["sec_fts"]["raw_hits_examined"] = 1
+        payload["coverage"]["sec_fts"]["in_census_candidates"] = 1
+        payload["coverage"]["sec_fts"]["retained_candidates"] = 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+                mode="fast",
+            )
+
+        audit = FILING.coverage_audit(state)
+        summary = FILING.summarize_bundles(eligible)[0]
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(summary["candidate_sources"], ["sec_fts"])
+        self.assertEqual(
+            summary["attachment_hints"],
+            ["EX-10.1 · credit-agreement.htm"],
+        )
+        self.assertTrue(summary["metadata_only"])
+        self.assertEqual(audit["candidate_count"], 1)
+        self.assertEqual(audit["candidate_filer_count"], 1)
+        self.assertEqual(audit["not_checked_filer_count"], 1)
+        self.assertEqual(audit["unpolled_filer_count"], 0)
+        self.assertFalse(audit["complete"])
+        self.assertIn("fast_scan_not_checked", audit["inconsistencies"])
+
+    def test_import_fast_scan_reports_bounded_sec_fts_query_limitation(self):
+        """Audit one capped external phrase from its compact artifact issue record."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        payload = _server_scan_payload(
+            state,
+            status="checked_empty",
+            mode="fast",
+        )
+        payload["coverage"]["partial_results"] = True
+        payload["coverage"]["candidate_results_capped"] = True
+        payload["coverage"]["candidate_discovery_status"] = "limited"
+        payload["coverage"]["recommended_follow_up"] = {
+            "mode": "thorough",
+            "reason": "candidate_results_capped",
+        }
+        payload["coverage"]["sec_fts"]["search_status"] = "partial"
+        payload["coverage"]["sec_fts"]["queries_truncated"] = 1
+        payload["coverage"]["search_issues"] = [{
+            "query_index": 0,
+            "status": "truncated",
+            "failure_code": "sec_fts_result_cap",
+            "retryable": False,
+            "truncated": True,
+            "pages_completed": 5,
+            "raw_hits_examined": 500,
+        }]
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+                mode="fast",
+            )
+
+        audit = FILING.coverage_audit(state)
+        self.assertEqual(audit["search_issue_count"], 1)
+        self.assertFalse(audit["complete"])
+        self.assertIn("fast_external_search_limited", audit["inconsistencies"])
+
+    def test_recovery_issues_are_reconciled_and_pageable(self):
+        """Expose filtered investigation details only through the explicit helper."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        payload = _server_scan_payload(
+            state,
+            status="failed",
+            reason="internal_and_sec_unavailable",
+        )
+        accession, record = next(iter(state["accessions"].items()))
+        payload["coverage"]["outcomes"][0]["source"] = "none"
+        payload["coverage"]["sources"]["internal"] = 0
+        payload["coverage"]["sources"]["none"] = 1
+        payload["coverage"]["exact_accessions_queued"] = 1
+        payload["coverage"]["exact_accessions_completed"] = 1
+        payload["coverage"]["exact_accessions_failed"] = 1
+        payload["coverage"]["sec_recovery_failure_categories"] = {
+            "unsupported_content": 1
+        }
+        payload["coverage"]["recovery_issues"] = [{
+            "accession_number": accession,
+            "ciks": record["issuer_ciks"],
+            "filing_type": record["filing_type"],
+            "filing_date": record["filing_date"],
+            "dfin_gap_reason": "unexpected_internal_gap",
+            "failure_code": "unsupported_content",
+            "attempts": 1,
+            "retryable": False,
+            "recommended_action": "inspect_filing_attachments",
+            "attachment_document_type": "EX-10.1",
+            "attachment_filename": "agreement.html",
+            "attachment_extension": ".html",
+            "response_content_type": "application/zip",
+        }]
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            FILING.import_server_scan(state, artifact_path, THEMATIC_QUERIES, 5)
+
+        page = FILING.coverage_issues_page(
+            state,
+            attachment_format="application/zip",
+            retryability="deterministic",
+        )
+        extension_page = FILING.coverage_issues_page(
+            state,
+            attachment_format=".html",
+            retryability="deterministic",
+        )
+
+        self.assertEqual(page["scan_id"], "a" * 32)
+        self.assertEqual(page["total_issue_count"], 1)
+        self.assertEqual(page["shown_count"], 1)
+        self.assertEqual(page["issues"][0]["accession_number"], accession)
+        self.assertEqual(extension_page["shown_count"], 1)
+        joint_state = {
+            "accessions": {
+                accession: {
+                    **record,
+                    "issuer_ciks": [*record["issuer_ciks"], "0000000002"],
+                }
+            }
+        }
+        omitted_joint_filer = dict(page["issues"][0])
+        malformed_document_type = {
+            **page["issues"][0],
+            "attachment_document_type": {"unexpected": "value"},
+        }
+
+        self.assertFalse(FILING._valid_recovery_issue(omitted_joint_filer, joint_state))
+        self.assertFalse(FILING._valid_recovery_issue(malformed_document_type, state))
+        arguments = FILING._argument_parser().parse_args([
+            "coverage-issues",
+            "--state",
+            "coverage.json",
+        ])
+        self.assertEqual(arguments.limit, 25)
 
 
 class DashboardBuilderTests(unittest.TestCase):
@@ -3732,7 +3962,6 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("search_filing_census", skill)
         self.assertIn("coverage-import-scan", skill)
         self.assertIn("server-bound", skill)
-        self.assertIn("total_filers = checked + failed", skill)
         self.assertIn("groups of at most four", skill)
         self.assertIn('fields: ["price", "returns", "profile", "description", "technicals", "earnings_history"]', skill)
         self.assertIn("retry the same initial request or continuation unchanged", skill)
