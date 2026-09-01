@@ -89,19 +89,19 @@ Use the bounded completion diagnostics for the ordinary report. Only when the us
 python3 <skill-dir>/scripts/filing_artifact.py coverage-issues --state <coverage-state-path> [--code <failure-code>] [--retryability retryable|deterministic] [--format <extension-or-content-type>] [--offset <next offset>]
 ```
 
-6. Run the audit before enrichment:
+6. Run the retrieval audit before enrichment:
 
 ```text
 python3 <skill-dir>/scripts/filing_artifact.py coverage-audit --state <coverage-state-path>
 ```
 
-Fast mode merges bounded candidate pools from DFin indexed filing text and SEC full-text search over the frozen date and form scope. SEC hits are retained only when their accession maps back to the frozen census and the matched attachment is HTML; distinct HTML exhibits may appear as separate candidates. This route does not download each filing during the scan, and a clean completion does not support a comprehensive no-match conclusion. An incomplete or not-checked filer, a limited SEC query, incomplete census, malformed receipt, or `results_complete: false` also blocks comprehensive conclusions. When a comprehensive conclusion is required after a fast scan, initialize a new coverage-state path from the saved census artifact with the same expected forms, retain the exact query array and `results_per_query`, and start and import a `thorough` scan against the same frozen census. Do not call `list_latest_filings` again or reuse the fast scan's coverage state, which is already bound to its completed server receipt. A receipt's `recommended_follow_up` is a mandatory signal to take this path for a comprehensive request, not the only reason to do so. Delete all census, state, scan, sidecar, and evidence files after the final result.
+Fast mode merges bounded candidate pools from DFin indexed filing text and SEC full-text search over the frozen date and form scope. SEC hits are retained only when their accession maps back to the frozen census and the matched attachment is HTML. The server consolidates duplicate query, attachment, document, and chunk evidence into one company/accession filing bundle. This route does not download each filing during the scan, and a clean completion does not support a comprehensive no-match conclusion. An incomplete or not-checked filer, a limited SEC query, incomplete census, malformed receipt, or `results_complete: false` also blocks comprehensive conclusions. When a comprehensive conclusion is required after a fast scan, initialize a new coverage-state path from the saved census artifact with the same expected forms, retain the exact query array and `results_per_query`, and start and import a `thorough` scan against the same frozen census. Do not call `list_latest_filings` again or reuse the fast scan's coverage state, which is already bound to its completed server receipt. A receipt's `recommended_follow_up` is a mandatory signal to take this path for a comprehensive request, not the only reason to do so. Delete all census, state, scan, sidecar, and evidence files after the final result.
 
 ### Identity and source rules
 
 - CIK is the authoritative coverage identity; preserve every ticker alias returned by the census.
 - In fast mode, DFin searches mapped filing documents while SEC full-text search independently discovers candidates for the same frozen date, form, and accession population. A result source may be `internal`, `sec_fts`, or `mixed`; `not_checked` means the fast route could not inspect every frozen accession for that filer, even if a positive SEC candidate was found.
-- In thorough mode, covered CIKs start in DFin. When the live census permits external access, a frozen accession that is missing or fails internally is recovered by exact CIK/accession identity from the SEC accession index and its `.htm` or `.html` Document Format files; a filer may therefore finish with `internal`, `sec`, or `mixed` source. Explicitly uncovered frozen accessions use the same path. This recovery does not run SEC full-text discovery and cannot add out-of-census accessions.
+- In thorough mode, DFin first maps every frozen accession to permanent and already indexed temporary documents. Missing accessions are recovered by exact CIK/accession identity from the SEC accession index, and only `.htm` or `.html` Document Format files are parsed, chunked, and indexed as keyword-only temporary DFin documents. After ingestion finishes, the ordinary grouped search runs across permanent and temporary UUIDs together; permanent documents retain hybrid retrieval, while temporary documents participate through full-text search. A filer may therefore finish with `internal`, `sec`, or `mixed` source. This recovery does not run SEC full-text discovery and cannot add out-of-census accessions.
 - Treat `checked_hit` and `checked_empty` as successful only after every frozen accession associated with that filer was searched. `internal_and_sec_unavailable` means at least one accession remained unavailable even if the artifact retains partial evidence from the filer.
 - Exact recovery searches the primary filing and HTML exhibits selected from SEC Document Format Files. It never downloads Data Files such as XBRL ZIP/XML packages; use the bounded `recovery_scope` counts to explain which HTML and non-HTML rows were encountered without dumping filenames.
 - Use CIK plus SEC accession as the filing bundle identity; fall back to `doc_uuid` only when no accession exists.
@@ -125,6 +125,16 @@ python3 <skill-dir>/scripts/filing_artifact.py select --artifact <scan-json-path
 ```
 
 Call `search_in_documents` with one tight query, at most 20 UUIDs, `results_per_query: 3`, `max_results_per_doc_uuid: 3`, and `delivery: api`; pass the result to `summarize --fetch --save`. Stop as soon as classification is possible. Retrieve a known chunk only when bounded evidence ends at a material boundary. Never walk neighboring chunks or fetch an entire document speculatively.
+
+Record every filing bundle classification in the scan-bound coverage state. Batch bundle IDs by classification when practical:
+
+```text
+python3 <skill-dir>/scripts/filing_artifact.py coverage-classify --state <coverage-state-path> --status confirmed --bundle <bundle-id> [--bundle <bundle-id> ...]
+python3 <skill-dir>/scripts/filing_artifact.py coverage-classify --state <coverage-state-path> --status flagged --bundle <bundle-id> [--bundle <bundle-id> ...]
+python3 <skill-dir>/scripts/filing_artifact.py coverage-classify --state <coverage-state-path> --status excluded --bundle <bundle-id> [--bundle <bundle-id> ...]
+```
+
+After every returned filing bundle is classified, run `coverage-audit` again. Thorough retrieval can prove that every available filing was searched, but only this final classification audit can set `comprehensive: true` and support a definitive topic no-match conclusion. Fast mode never supports that conclusion.
 
 ## 4. Enrich selected companies
 

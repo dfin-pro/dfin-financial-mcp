@@ -46,6 +46,9 @@ DEFAULT_COVERAGE_ISSUES = 25
 COVERAGE_STATE_VERSION = 4
 SUMMARY_INDEX_VERSION = 2
 SUMMARY_INDEX_SUFFIX = ".summary-index.json"
+FILING_CENSUS_ARTIFACT_SCHEMA_VERSION = 2
+FILING_BUNDLE_ID_RE = re.compile(r"^filing:[0-9a-f]{24}$")
+FILING_BUNDLE_CLASSIFICATIONS = frozenset({"confirmed", "flagged", "excluded"})
 ALLOWED_FAILURE_REASONS = frozenset(
     {
         "artifact_unavailable",
@@ -294,8 +297,94 @@ def _looks_like_result(value):
     return has_document and has_filing
 
 
+def _expand_filing_bundle(value):
+    """Return validated nested evidence for one server filing bundle or ``None``."""
+    rv = None
+
+    if isinstance(value, dict) and isinstance(value.get("evidence"), list):
+        bundle_id = value.get("bundle_id")
+        evidence = value["evidence"]
+
+        if (
+            not isinstance(bundle_id, str)
+            or FILING_BUNDLE_ID_RE.fullmatch(bundle_id) is None
+            or not isinstance(value.get("evidence_count"), int)
+            or isinstance(value.get("evidence_count"), bool)
+            or value.get("evidence_count") != len(evidence)
+            or not evidence
+        ):
+            raise HelperError("The saved search response contains a malformed filing bundle.")
+
+        expanded = []
+
+        for item in evidence:
+            decoded = _decode_result(item)
+
+            if not _looks_like_result(decoded):
+                raise HelperError("A filing bundle contains malformed evidence.")
+
+            result = dict(decoded)
+
+            for key in (
+                "scan_cik",
+                "accession_number",
+                "ticker",
+                "name",
+                "filing_type",
+                "filing_date",
+            ):
+                if result.get(key) in (None, "") and value.get(key) not in (None, ""):
+                    result[key] = value[key]
+
+            result["_filing_bundle_id"] = bundle_id
+            expanded.append(result)
+
+        rv = expanded
+
+    return rv
+
+
+def _expanded_results(values, *, strict=True, require_bundles=False):
+    """Flatten server filing bundles while preserving legacy result artifacts."""
+    rv = []
+
+    for value in values:
+        decoded = _decode_result(value)
+        expanded = _expand_filing_bundle(decoded)
+
+        if expanded is not None:
+            rv.extend(expanded)
+
+        elif not require_bundles and _looks_like_result(decoded):
+            rv.append(decoded)
+
+        elif strict:
+            raise HelperError("The saved search response contains a malformed filing result.")
+
+    return rv
+
+
+def _filing_census_artifact_schema(payload):
+    """Validate and return the optional filing-census artifact schema version."""
+    schema_version = payload.get("schema_version") if isinstance(payload, dict) else None
+
+    if (
+        schema_version is not None
+        and (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != FILING_CENSUS_ARTIFACT_SCHEMA_VERSION
+        )
+    ):
+        raise HelperError("The saved search response uses an unsupported schema version.")
+
+    return schema_version
+
+
 def normalize_results(payload):
     """Return normalized result dictionaries from supported artifact shapes."""
+    schema_version = _filing_census_artifact_schema(payload)
+
     if isinstance(payload, dict):
         if isinstance(payload.get("results"), list):
             values = payload["results"]
@@ -316,7 +405,11 @@ def normalize_results(payload):
             "Unsupported artifact shape; expected an object envelope or list."
         )
 
-    return [decoded for value in values if (decoded := _decode_result(value))]
+    return _expanded_results(
+        values,
+        strict=schema_version == FILING_CENSUS_ARTIFACT_SCHEMA_VERSION,
+        require_bundles=schema_version == FILING_CENSUS_ARTIFACT_SCHEMA_VERSION,
+    )
 
 
 def load_artifact(path):
@@ -434,10 +527,14 @@ def _qualified_ticker(value):
 
 
 def _bundle_identity(result):
+    server_bundle_id = result.get("_filing_bundle_id")
     cik, accession = _cik_and_accession(result)
     doc_uuid = str(result.get("doc_uuid") or "")
 
-    if cik and accession:
+    if isinstance(server_bundle_id, str) and FILING_BUNDLE_ID_RE.fullmatch(server_bundle_id):
+        bundle_id = server_bundle_id
+        cik = _valid_cik(result.get("scan_cik")) or cik
+    elif cik and accession:
         bundle_id = f"sec:{cik}:{accession}"
     elif doc_uuid:
         digest = hashlib.sha256(doc_uuid.encode("utf-8")).hexdigest()[:16]
@@ -800,8 +897,16 @@ def load_search_response(path):
         ) from None
 
     payload = _decode_search_envelope(payload)
+    schema_version = _filing_census_artifact_schema(payload)
     response_id = hashlib.sha256(response_bytes).hexdigest()
     artifact_id = hashlib.sha256(response_path).hexdigest()
+
+    if schema_version == FILING_CENSUS_ARTIFACT_SCHEMA_VERSION and (
+        not isinstance(payload, dict)
+        or "count" not in payload
+        or not isinstance(payload.get("results"), list)
+    ):
+        raise HelperError("The versioned filing artifact lacks its count or results array.")
 
     if isinstance(payload, list):
         raw_results = payload
@@ -827,15 +932,10 @@ def load_search_response(path):
     if declared_count != len(raw_results):
         raise HelperError("The saved search response count does not match its results.")
 
-    results = []
-
-    for value in raw_results:
-        decoded = _decode_result(value)
-
-        if not isinstance(decoded, dict) or not _looks_like_result(decoded):
-            raise HelperError("The saved search response contains a malformed filing result.")
-
-        results.append(decoded)
+    results = _expanded_results(
+        raw_results,
+        require_bundles=schema_version == FILING_CENSUS_ARTIFACT_SCHEMA_VERSION,
+    )
 
     return results, declared_count, response_id, artifact_id
 
@@ -1221,6 +1321,7 @@ def _enumeration_state(payload, expected_forms):
         "server_not_checked": {},
         "server_incomplete": {},
         "server_scan": None,
+        "bundle_classifications": {},
         "unexpected": [],
         "unexpected_accessions": [],
         "included_companions": {},
@@ -1318,9 +1419,9 @@ def _valid_server_scan(state):
             route_sources = (
                 allowed_sources
                 if coverage_state == "covered"
-                else {"sec_fts", "none"}
+                else {"internal", "sec_fts", "mixed", "none"}
                 if mode == "fast"
-                else {"sec", "none"}
+                else allowed_sources
             )
             valid_route = coverage_state in {
                 "covered",
@@ -1416,8 +1517,23 @@ def _valid_server_scan(state):
             and incomplete_count == 0
             and checked_count == len(known_ciks)
         )
+        bundle_ids = scan.get("bundle_ids")
+        valid_bundle_ids = (
+            bundle_ids is None
+            or (
+                isinstance(bundle_ids, list)
+                and len(bundle_ids) == len(set(bundle_ids))
+                and all(
+                    isinstance(bundle_id, str)
+                    and FILING_BUNDLE_ID_RE.fullmatch(bundle_id) is not None
+                    for bundle_id in bundle_ids
+                )
+                and len(bundle_ids) == scan.get("result_count")
+            )
+        )
         rv = (
             valid_outcomes
+            and valid_bundle_ids
             and outcome_ciks == known_ciks
             and scan.get("request_binding") == "server_bound"
             and scan.get("census_fingerprint") == _server_census_fingerprint(state)
@@ -1753,6 +1869,16 @@ def _valid_recovery_receipt(value, state, query_count=None):
         and value.get("complete") is True
         and value.get("results_complete") is True
     )
+    uses_classification_contract = "classification_required" in value
+    valid_conclusion_contract = (
+        value.get("negative_findings_supported") is False
+        and value.get("classification_required") is (mode == "thorough")
+        and value.get("retrieval_complete") is expected_comprehensive
+        and value.get("comprehensive") is False
+        if uses_classification_contract
+        else value.get("negative_findings_supported") is (mode == "thorough")
+        and value.get("comprehensive") is expected_comprehensive
+    )
     sec_fts_limited = bool(
         mode == "fast"
         and isinstance(sec_fts, dict)
@@ -1831,8 +1957,7 @@ def _valid_recovery_receipt(value, state, query_count=None):
             and search_issues is None
         )
         and value.get("retrieval_scope") == expected_retrieval_scope
-        and value.get("negative_findings_supported") is (mode == "thorough")
-        and value.get("comprehensive") is expected_comprehensive
+        and valid_conclusion_contract
         and value.get("partial_results") is expected_partial
         and isinstance(value.get("results_complete"), bool)
         and value["exact_accessions_retrying"] == 0
@@ -1951,6 +2076,9 @@ def _validate_state(state):
     if "server_scan" not in state:
         state["server_scan"] = None
 
+    if "bundle_classifications" not in state:
+        state["bundle_classifications"] = {}
+
     if _contains_capability_url(state):
         raise HelperError("Capability URLs cannot be stored in coverage state.")
 
@@ -1969,6 +2097,7 @@ def _validate_state(state):
         "server_checked",
         "server_not_checked",
         "server_incomplete",
+        "bundle_classifications",
         "included_companions",
         "excluded_post_census",
     )
@@ -2137,6 +2266,28 @@ def _validate_state(state):
 
     if not _valid_server_scan(state):
         raise HelperError("The server-bound census scan receipt is invalid.")
+
+    server_scan_id = (
+        state["server_scan"].get("scan_id")
+        if isinstance(state.get("server_scan"), dict)
+        else None
+    )
+    server_bundle_ids = set(
+        state["server_scan"].get("bundle_ids") or []
+        if isinstance(state.get("server_scan"), dict)
+        else []
+    )
+
+    if not all(
+        isinstance(bundle_id, str)
+        and bundle_id in server_bundle_ids
+        and isinstance(record, dict)
+        and set(record) == {"scan_id", "status"}
+        and record.get("scan_id") == server_scan_id
+        and record.get("status") in FILING_BUNDLE_CLASSIFICATIONS
+        for bundle_id, record in state["bundle_classifications"].items()
+    ):
+        raise HelperError("The coverage state contains malformed filing classifications.")
 
     for key, companion in (
         ("included_companions", True),
@@ -2468,6 +2619,7 @@ def reset_searches(state):
     state["server_not_checked"] = {}
     state["server_incomplete"] = {}
     state["server_scan"] = None
+    state["bundle_classifications"] = {}
     state["unexpected"] = []
     state["unexpected_accessions"] = []
     state["included_companions"] = {}
@@ -3292,6 +3444,31 @@ def import_server_scan(
     payload = _load_json_value(artifact_path)
     results, result_count, response_id, artifact_id = load_search_response(artifact_path)
     coverage = payload.get("coverage") if isinstance(payload, dict) else None
+    raw_results = payload.get("results") if isinstance(payload, dict) else None
+    bundle_ids = []
+
+    if isinstance(raw_results, list) and raw_results:
+        bundle_values = [
+            value
+            for value in raw_results
+            if isinstance(value, dict) and isinstance(value.get("evidence"), list)
+        ]
+
+        if bundle_values and len(bundle_values) != len(raw_results):
+            raise HelperError("The server artifact mixes filing bundles and legacy results.")
+
+        if bundle_values:
+            bundle_ids = [value.get("bundle_id") for value in bundle_values]
+
+            if (
+                len(bundle_ids) != len(set(bundle_ids))
+                or any(
+                    not isinstance(bundle_id, str)
+                    or FILING_BUNDLE_ID_RE.fullmatch(bundle_id) is None
+                    for bundle_id in bundle_ids
+                )
+            ):
+                raise HelperError("The server artifact contains invalid filing bundle identities.")
 
     if not isinstance(coverage, dict) or coverage.get("request_binding") != "server_bound":
         raise HelperError("The saved artifact lacks a server-bound coverage receipt.")
@@ -3459,6 +3636,8 @@ def import_server_scan(
         "mode": coverage.get("mode"),
         "retrieval_scope": coverage.get("retrieval_scope"),
         "negative_findings_supported": coverage.get("negative_findings_supported"),
+        "classification_required": coverage.get("classification_required"),
+        "retrieval_complete": coverage.get("retrieval_complete"),
         "partial_results": coverage.get("partial_results"),
         "comprehensive": coverage.get("comprehensive"),
         "recommended_follow_up": coverage.get("recommended_follow_up"),
@@ -3468,6 +3647,7 @@ def import_server_scan(
         "sec_fts": coverage.get("sec_fts"),
         "search_issues": coverage.get("search_issues"),
         "exact_accessions_queued": coverage.get("exact_accessions_queued"),
+        "temporary_ingestion": coverage.get("temporary_ingestion"),
         "exact_accessions_completed": coverage.get("exact_accessions_completed"),
         "exact_accessions_retrying": coverage.get("exact_accessions_retrying"),
         "exact_accessions_recovered": coverage.get("exact_accessions_recovered"),
@@ -3481,6 +3661,13 @@ def import_server_scan(
         "recovery_scope": coverage.get("recovery_scope"),
         "outcomes": outcomes,
     }
+
+    if "classification_required" not in coverage:
+        state["server_scan"].pop("classification_required", None)
+        state["server_scan"].pop("retrieval_complete", None)
+
+    if bundle_ids:
+        state["server_scan"]["bundle_ids"] = bundle_ids
     state["consumed_responses"][response_id] = "server_scan"
     state["consumed_artifacts"][artifact_id] = "server_scan"
     eligible_results = _eligible_results_for_state(state, results)
@@ -3549,6 +3736,51 @@ def coverage_issues_page(
         "shown_count": len(shown),
         "remaining_issue_count": remaining,
         "issues": shown,
+    }
+
+    return rv
+
+
+def classify_filing_bundles(state, bundle_ids, status):
+    """Retain agent classifications for filing bundles bound to one server scan."""
+    _validate_state(state)
+    scan = state.get("server_scan")
+
+    if not isinstance(scan, dict):
+        raise HelperError("The coverage state does not contain a completed server scan.")
+
+    if status not in FILING_BUNDLE_CLASSIFICATIONS:
+        raise HelperError("The filing classification is invalid.")
+
+    known_bundle_ids = set(scan.get("bundle_ids") or [])
+    selected_bundle_ids = list(dict.fromkeys(bundle_ids or []))
+
+    if not selected_bundle_ids:
+        raise HelperError("Provide at least one filing bundle to classify.")
+
+    if any(bundle_id not in known_bundle_ids for bundle_id in selected_bundle_ids):
+        raise HelperError("A filing classification references an unknown server bundle.")
+
+    for bundle_id in selected_bundle_ids:
+        state["bundle_classifications"][bundle_id] = {
+            "scan_id": scan["scan_id"],
+            "status": status,
+        }
+
+    counts = {
+        classification: sum(
+            record.get("status") == classification
+            and record.get("scan_id") == scan["scan_id"]
+            for record in state["bundle_classifications"].values()
+        )
+        for classification in sorted(FILING_BUNDLE_CLASSIFICATIONS)
+    }
+    rv = {
+        "scan_id": scan["scan_id"],
+        "recorded_count": len(selected_bundle_ids),
+        "classification_counts": counts,
+        "classified_bundle_count": sum(counts.values()),
+        "unclassified_bundle_count": max(len(known_bundle_ids) - sum(counts.values()), 0),
     }
 
     return rv
@@ -3703,9 +3935,44 @@ def coverage_audit(state):
         and not not_checked
         and not incomplete
     )
+    scan_id = state["server_scan"].get("scan_id") if server_bound else None
+    bundle_ids = set(state["server_scan"].get("bundle_ids") or []) if server_bound else set()
+    classifications = {
+        bundle_id: record
+        for bundle_id, record in state.get("bundle_classifications", {}).items()
+        if bundle_id in bundle_ids and record.get("scan_id") == scan_id
+    }
+    classification_counts = {
+        classification: sum(
+            record.get("status") == classification
+            for record in classifications.values()
+        )
+        for classification in sorted(FILING_BUNDLE_CLASSIFICATIONS)
+    }
+    unclassified_bundle_count = max(len(bundle_ids) - len(classifications), 0)
+    server_retrieval_complete = (
+        state["server_scan"].get("retrieval_complete")
+        if server_bound and "retrieval_complete" in state["server_scan"]
+        else state["server_scan"].get("comprehensive")
+        if server_bound
+        else True
+    )
+    retrieval_complete = bool(
+        complete
+        and server_retrieval_complete is True
+    )
+    comprehensive = bool(
+        retrieval_complete
+        and (
+            state["server_scan"].get("mode") == "thorough"
+            if server_bound
+            else True
+        )
+        and unclassified_bundle_count == 0
+    )
     output = {
         "complete": complete,
-        "scan_id": state["server_scan"].get("scan_id") if server_bound else None,
+        "scan_id": scan_id,
         "census_fingerprint": state["census_fingerprint"],
         "as_of": enumeration.get("as_of"),
         "selected_forms": scope.get("expected_forms") or [],
@@ -3734,14 +4001,12 @@ def coverage_audit(state):
         "retrieval_scope": (
             state["server_scan"].get("retrieval_scope") if server_bound else None
         ),
-        "negative_findings_supported": (
-            state["server_scan"].get("negative_findings_supported")
-            if server_bound
-            else None
-        ),
-        "comprehensive": (
-            state["server_scan"].get("comprehensive") if server_bound else complete
-        ),
+        "retrieval_complete": retrieval_complete,
+        "negative_findings_supported": comprehensive,
+        "comprehensive": comprehensive,
+        "classification_counts": classification_counts,
+        "classified_bundle_count": len(classifications),
+        "unclassified_bundle_count": unclassified_bundle_count,
         "recommended_follow_up": (
             state["server_scan"].get("recommended_follow_up")
             if server_bound
@@ -4153,6 +4418,15 @@ def _argument_parser():
     )
     coverage_issues.add_argument("--format", dest="attachment_format")
 
+    coverage_classify = subparsers.add_parser("coverage-classify")
+    coverage_classify.add_argument("--state", type=Path, required=True)
+    coverage_classify.add_argument("--bundle", action="append", required=True)
+    coverage_classify.add_argument(
+        "--status",
+        choices=tuple(sorted(FILING_BUNDLE_CLASSIFICATIONS)),
+        required=True,
+    )
+
     coverage_bind_ticker = subparsers.add_parser("coverage-bind-ticker")
     coverage_bind_ticker.add_argument("--state", type=Path, required=True)
     coverage_bind_ticker.add_argument("--cik", required=True)
@@ -4352,7 +4626,7 @@ def main(argv=None):
                 mode=arguments.mode,
             )
             _write_state(arguments.state, state)
-            results, _count, response_id, artifact_id = load_search_response(artifact_path)
+            results, bundle_count, response_id, artifact_id = load_search_response(artifact_path)
             summaries = _write_summary_index(
                 artifact_path,
                 state,
@@ -4364,7 +4638,7 @@ def main(argv=None):
                 "status": "recorded",
                 "request_binding": "server_bound",
                 "scan_id": state["server_scan"].get("scan_id"),
-                "result_count": len(results),
+                "result_count": bundle_count,
                 "eligible_result_count": len(eligible_results),
                 "checked_filer_count": len(state["server_checked"]),
                 "candidate_filer_count": state["server_scan"].get(
@@ -4422,6 +4696,15 @@ def main(argv=None):
                 retryability=arguments.retryability,
                 attachment_format=arguments.attachment_format,
             )
+
+        elif arguments.command == "coverage-classify":
+            state = _load_state(arguments.state)
+            output = classify_filing_bundles(
+                state,
+                arguments.bundle,
+                arguments.status,
+            )
+            _write_state(arguments.state, state)
 
         elif arguments.command == "coverage-add-search":
             state = _load_state(arguments.state)
