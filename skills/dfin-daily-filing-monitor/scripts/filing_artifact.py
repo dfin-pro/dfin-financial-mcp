@@ -49,6 +49,36 @@ SUMMARY_INDEX_SUFFIX = ".summary-index.json"
 FILING_CENSUS_ARTIFACT_SCHEMA_VERSION = 2
 FILING_BUNDLE_ID_RE = re.compile(r"^filing:[0-9a-f]{24}$")
 FILING_BUNDLE_CLASSIFICATIONS = frozenset({"confirmed", "flagged", "excluded"})
+CANDIDATE_ISSUE_REASONS = frozenset(
+    {
+        "filing_date_outside_window",
+        "malformed_filing_date",
+        "malformed_filing_type",
+        "issuer_outside_census",
+        "issuer_identity_conflict",
+        "missing_companion_accession",
+        "ticker_identity_conflict",
+        "filing_metadata_conflict",
+        "unresolved_filing_identity",
+    }
+)
+CANDIDATE_ISSUE_FIELDS = frozenset(
+    {"accession", "cik", "filing_date", "filing_type", "ticker"}
+)
+HARMLESS_CANDIDATE_ISSUE_REASONS = frozenset(
+    {"filing_date_outside_window", "issuer_outside_census"}
+)
+CANDIDATE_ISSUE_EXPECTATIONS = {
+    "filing_date_outside_window": "an ISO-8601 filing date within the requested window",
+    "malformed_filing_date": "an ISO-8601 filing date within the requested window",
+    "malformed_filing_type": "a non-empty filing type",
+    "issuer_outside_census": "an issuer in the eligible filing set",
+    "issuer_identity_conflict": "CIK and accession metadata that match the eligible filing set",
+    "missing_companion_accession": "a valid SEC accession for the companion filing",
+    "ticker_identity_conflict": "a ticker associated with the identified issuer",
+    "filing_metadata_conflict": "filing metadata that matches the SEC accession",
+    "unresolved_filing_identity": "a CIK, ticker, or accession that identifies an eligible filing",
+}
 ALLOWED_FAILURE_REASONS = frozenset(
     {
         "artifact_unavailable",
@@ -1326,6 +1356,7 @@ def _enumeration_state(payload, expected_forms):
         "unexpected_accessions": [],
         "included_companions": {},
         "excluded_post_census": {},
+        "candidate_issues": [],
         "census_identity_issues": list(inconsistencies),
         "identity_issues": inconsistencies,
     }
@@ -1518,17 +1549,25 @@ def _valid_server_scan(state):
             and checked_count == len(known_ciks)
         )
         bundle_ids = scan.get("bundle_ids")
-        valid_bundle_ids = (
-            bundle_ids is None
-            or (
-                isinstance(bundle_ids, list)
-                and len(bundle_ids) == len(set(bundle_ids))
-                and all(
-                    isinstance(bundle_id, str)
-                    and FILING_BUNDLE_ID_RE.fullmatch(bundle_id) is not None
-                    for bundle_id in bundle_ids
+        discarded_out_of_window_bundle_count = scan.get(
+            "discarded_out_of_window_bundle_count"
+        )
+        valid_bundle_ids = bundle_ids is None or (
+            isinstance(bundle_ids, list)
+            and len(bundle_ids) == len(set(bundle_ids))
+            and all(
+                isinstance(bundle_id, str)
+                and FILING_BUNDLE_ID_RE.fullmatch(bundle_id) is not None
+                for bundle_id in bundle_ids
+            )
+            and (
+                len(bundle_ids) == scan.get("result_count")
+                if discarded_out_of_window_bundle_count is None
+                else (
+                    _valid_non_negative_integer(discarded_out_of_window_bundle_count)
+                    and len(bundle_ids) + discarded_out_of_window_bundle_count
+                    == scan.get("result_count")
                 )
-                and len(bundle_ids) == scan.get("result_count")
             )
         )
         rv = (
@@ -2079,6 +2118,9 @@ def _validate_state(state):
     if "bundle_classifications" not in state:
         state["bundle_classifications"] = {}
 
+    if "candidate_issues" not in state:
+        state["candidate_issues"] = []
+
     if _contains_capability_url(state):
         raise HelperError("Capability URLs cannot be stored in coverage state.")
 
@@ -2111,9 +2153,13 @@ def _validate_state(state):
         "unexpected_accessions",
         "census_identity_issues",
         "identity_issues",
+        "candidate_issues",
     ):
         if not isinstance(state.get(key), list):
             raise HelperError(f"The coverage state field {key} must be an array.")
+
+    if not all(_valid_candidate_issue(issue) for issue in state["candidate_issues"]):
+        raise HelperError("The coverage state contains an invalid candidate issue.")
 
     scope = state["scope"]
     expected_forms = _normalized_expected_forms(scope.get("expected_forms"))
@@ -2624,6 +2670,7 @@ def reset_searches(state):
     state["unexpected_accessions"] = []
     state["included_companions"] = {}
     state["excluded_post_census"] = {}
+    state["candidate_issues"] = []
     state["identity_issues"] = list(state["census_identity_issues"])
     return state
 
@@ -2662,6 +2709,125 @@ def _record_excluded_post_census(state, result, source_cik, accession):
     state["excluded_post_census"].setdefault(
         accession,
         _post_census_record(result, source_cik, accession),
+    )
+
+
+def _candidate_issue_identity(result, source_cik=None, accession=None):
+    """Return bounded, non-evidence metadata for one excluded candidate."""
+    scan_cik = _valid_cik(result.get("scan_cik"))
+    company = " ".join(str(result.get("name") or "").split())[:160] or None
+    filing_type = " ".join(str(result.get("filing_type") or "").split())[:50] or None
+    bundle_id = result.get("_filing_bundle_id")
+    bundle_id = bundle_id if isinstance(bundle_id, str) and FILING_BUNDLE_ID_RE.fullmatch(bundle_id) else None
+
+    return {
+        "company": company,
+        "company_identity": "provider_reported",
+        "ticker": _qualified_ticker(result.get("ticker")),
+        "cik": scan_cik or source_cik,
+        "accession": accession,
+        "bundle_id": bundle_id,
+        "filing_type": filing_type,
+    }
+
+
+def _safe_candidate_value(value):
+    """Return a small diagnostic value without retaining URLs or evidence text."""
+    if value is None:
+        return "missing"
+
+    if isinstance(value, (dict, list, tuple, set)):
+        return "non_scalar"
+
+    text = " ".join(str(value).split())[:80]
+
+    if not text:
+        return "empty"
+
+    return "redacted" if CAPABILITY_URL_RE.search(text) else text
+
+
+def _record_candidate_issue(state, result, reason, fields, *, source_cik=None, accession=None):
+    """Record one specific, safe reason that a candidate was excluded."""
+    if reason not in CANDIDATE_ISSUE_REASONS:
+        raise HelperError("The candidate exclusion reason is invalid.")
+
+    issue_fields = sorted(set(fields))
+
+    if not issue_fields or any(field not in CANDIDATE_ISSUE_FIELDS for field in issue_fields):
+        raise HelperError("The candidate exclusion fields are invalid.")
+
+    issue = {
+        **_candidate_issue_identity(result, source_cik, accession),
+        "reason": reason,
+        "fields": issue_fields,
+        "reported_values": {
+            field: _safe_candidate_value(
+                (
+                    result.get("scan_cik") or source_cik
+                    if field == "cik"
+                    else accession
+                    if field == "accession"
+                    else result.get(field)
+                )
+            )
+            for field in issue_fields
+        },
+        "expected": CANDIDATE_ISSUE_EXPECTATIONS[reason],
+        "disposition": "excluded_from_main_results",
+    }
+
+    if issue not in state["candidate_issues"]:
+        state["candidate_issues"].append(issue)
+
+
+def _valid_candidate_issue(value):
+    if not isinstance(value, dict) or set(value) != {
+        "company",
+        "company_identity",
+        "ticker",
+        "cik",
+        "accession",
+        "bundle_id",
+        "filing_type",
+        "reason",
+        "fields",
+        "reported_values",
+        "expected",
+        "disposition",
+    }:
+        return False
+
+    company = value.get("company")
+    filing_type = value.get("filing_type")
+    ticker = value.get("ticker")
+    cik = value.get("cik")
+    accession = value.get("accession")
+    bundle_id = value.get("bundle_id")
+    fields = value.get("fields")
+    reported_values = value.get("reported_values")
+    expected = value.get("expected")
+    return (
+        (company is None or (isinstance(company, str) and 0 < len(company) <= 160))
+        and value.get("company_identity") == "provider_reported"
+        and (filing_type is None or (isinstance(filing_type, str) and 0 < len(filing_type) <= 50))
+        and (ticker is None or _qualified_ticker(ticker) == ticker)
+        and (cik is None or _valid_cik(cik) == cik)
+        and (accession is None or _normalized_accession(accession) == accession)
+        and (bundle_id is None or FILING_BUNDLE_ID_RE.fullmatch(bundle_id) is not None)
+        and value.get("reason") in CANDIDATE_ISSUE_REASONS
+        and isinstance(fields, list)
+        and bool(fields)
+        and fields == sorted(set(fields))
+        and all(field in CANDIDATE_ISSUE_FIELDS for field in fields)
+        and isinstance(reported_values, dict)
+        and set(reported_values) == set(fields)
+        and all(
+            isinstance(reported_value, str) and 0 < len(reported_value) <= 80
+            for reported_value in reported_values.values()
+        )
+        and expected == CANDIDATE_ISSUE_EXPECTATIONS.get(value.get("reason"))
+        and value.get("disposition") == "excluded_from_main_results"
     )
 
 
@@ -2719,13 +2885,59 @@ def _accession_issuer_ciks(state, accession, source_cik):
     return sorted(set(issuer_ciks)) if source_cik in issuer_ciks else [source_cik]
 
 
-def _eligible_results_for_state(state, results):
+def _eligible_results_for_state(state, results, *, record_issues=False):
     """Filter model-facing summaries to frozen-census companies only."""
     aliases = _alias_map(state)
     eligible = []
 
     for result in results:
-        _validate_result_window(state, result)
+        # The server-bound receipt proves coverage against the frozen census,
+        # independently of any extra candidate it happens to deliver.  A
+        # syntactically valid candidate outside the requested filing window is
+        # therefore irrelevant to both the result set and its audit. Record
+        # malformed dates as an ambiguous excluded candidate, while discarding
+        # valid out-of-window extras as harmless scope leakage.
+        if not " ".join(str(result.get("filing_type") or "").split()):
+            if record_issues:
+                source_cik, accession = _sec_cik_and_accession(result)
+                _record_candidate_issue(
+                    state,
+                    result,
+                    "malformed_filing_type",
+                    ["filing_type"],
+                    source_cik=source_cik,
+                    accession=accession,
+                )
+            continue
+
+        try:
+            in_window = _result_is_within_window(state, result)
+        except HelperError:
+            if record_issues:
+                source_cik, accession = _sec_cik_and_accession(result)
+                _record_candidate_issue(
+                    state,
+                    result,
+                    "malformed_filing_date",
+                    ["filing_date"],
+                    source_cik=source_cik,
+                    accession=accession,
+                )
+            continue
+
+        if not in_window:
+            if record_issues:
+                source_cik, accession = _sec_cik_and_accession(result)
+                _record_candidate_issue(
+                    state,
+                    result,
+                    "filing_date_outside_window",
+                    ["filing_date"],
+                    source_cik=source_cik,
+                    accession=accession,
+                )
+            continue
+
         source_cik, accession = _sec_cik_and_accession(result)
         ticker = _qualified_ticker(result.get("ticker"))
         ticker_ciks = aliases.get(ticker.upper(), set()) if ticker else set()
@@ -2749,25 +2961,46 @@ def _eligible_results_for_state(state, results):
 
         elif source_cik in state["filers"]:
             if ticker_ciks and source_cik not in ticker_ciks:
+                if record_issues:
+                    _record_candidate_issue(
+                        state, result, "ticker_identity_conflict", ["ticker"],
+                        source_cik=source_cik, accession=accession,
+                    )
                 continue
 
             if accession is not None:
-                if classification == "excluded" or not _accession_record_matches_result(
-                    accession_record,
-                    source_cik,
-                    result,
+                if classification == "excluded":
+                    if record_issues:
+                        _record_candidate_issue(
+                            state, result, "unresolved_filing_identity", ["accession"],
+                            source_cik=source_cik, accession=accession,
+                        )
+                    continue
+                if not _accession_record_matches_result(
+                    accession_record, source_cik, result,
                 ):
+                    if record_issues:
+                        _record_candidate_issue(
+                            state, result, "filing_metadata_conflict",
+                            ["accession", "filing_date", "filing_type"],
+                            source_cik=source_cik, accession=accession,
+                        )
                     continue
 
             eligible.append(result)
         elif source_cik is None and len(ticker_ciks) == 1:
             eligible.append(result)
+        elif record_issues:
+            _record_candidate_issue(
+                state, result, "unresolved_filing_identity", ["cik", "ticker"],
+                source_cik=source_cik, accession=accession,
+            )
 
     return eligible
 
 
-def _validate_result_window(state, result):
-    """Require one search result to fall inside the enumerated filing-date window."""
+def _result_is_within_window(state, result):
+    """Return whether one validly dated result falls inside the frozen window."""
     filing_date = str(result.get("filing_date") or "").strip()
     filing_type = " ".join(str(result.get("filing_type") or "").split())
 
@@ -2781,7 +3014,12 @@ def _validate_result_window(state, result):
     except (KeyError, TypeError, ValueError) as exc:
         raise HelperError("A search result is missing a valid filing_date.") from exc
 
-    if not date_from <= parsed_date <= date_to:
+    return date_from <= parsed_date <= date_to
+
+
+def _validate_result_window(state, result):
+    """Require one search result to fall inside the enumerated filing-date window."""
+    if not _result_is_within_window(state, result):
         raise HelperError("A search result falls outside the enumerated date window.")
 
 
@@ -3580,6 +3818,8 @@ def import_server_scan(
         else:
             raise HelperError("The server receipt contains an invalid filer outcome.")
 
+    identity_validated_results = []
+
     for result in results:
         scan_cik = _valid_cik(result.get("scan_cik"))
         source_cik, accession = _sec_cik_and_accession(result)
@@ -3589,17 +3829,70 @@ def import_server_scan(
             and scan_cik in (census_record.get("issuer_ciks") or [])
         )
 
-        if scan_cik not in state["filers"] or (
+        if scan_cik not in state["filers"]:
+            in_scope_source = (
+                source_cik in state["filers"]
+                or accession in state["accessions"]
+            )
+            _record_candidate_issue(
+                state,
+                result,
+                "issuer_identity_conflict" if in_scope_source else "issuer_outside_census",
+                ["cik", "accession"] if in_scope_source else ["cik"],
+                source_cik=source_cik,
+                accession=accession,
+            )
+            continue
+
+        if (
             source_cik is not None and source_cik != scan_cik
             and not known_joint_association
         ):
-            raise HelperError("A server search result conflicts with its census issuer.")
+            _record_candidate_issue(
+                state,
+                result,
+                "issuer_identity_conflict",
+                ["cik", "accession"],
+                source_cik=source_cik,
+                accession=accession,
+            )
+            continue
 
         if result.get("companion") is True and accession not in state["accessions"]:
             if accession is None:
-                raise HelperError("A companion result is missing an SEC accession identity.")
+                _record_candidate_issue(
+                    state,
+                    result,
+                    "missing_companion_accession",
+                    ["accession"],
+                    source_cik=source_cik,
+                )
+                continue
 
-            _record_companion(state, result, scan_cik, accession)
+            try:
+                companion_is_in_window = _result_is_within_window(state, result)
+            except HelperError:
+                companion_is_in_window = False
+
+            if companion_is_in_window:
+                _record_companion(state, result, scan_cik, accession)
+
+        identity_validated_results.append(result)
+
+    eligible_results = _eligible_results_for_state(
+        state,
+        identity_validated_results,
+        record_issues=True,
+    )
+    eligible_bundle_ids = []
+
+    if bundle_ids:
+        eligible_bundle_id_set = {
+            result.get("_filing_bundle_id") for result in eligible_results
+        }
+        eligible_bundle_ids = [
+            bundle_id for bundle_id in bundle_ids if bundle_id in eligible_bundle_id_set
+        ]
 
     plan = {
         "query_count": len(clean_queries),
@@ -3667,10 +3960,12 @@ def import_server_scan(
         state["server_scan"].pop("retrieval_complete", None)
 
     if bundle_ids:
-        state["server_scan"]["bundle_ids"] = bundle_ids
+        state["server_scan"]["bundle_ids"] = eligible_bundle_ids
+        state["server_scan"]["discarded_out_of_window_bundle_count"] = (
+            len(bundle_ids) - len(eligible_bundle_ids)
+        )
     state["consumed_responses"][response_id] = "server_scan"
     state["consumed_artifacts"][artifact_id] = "server_scan"
-    eligible_results = _eligible_results_for_state(state, results)
     _validate_state(state)
 
     return eligible_results
@@ -3682,10 +3977,11 @@ def coverage_issues_page(
     limit=DEFAULT_COVERAGE_ISSUES,
     offset=0,
     code=None,
+    candidate_reason=None,
     retryability=None,
     attachment_format=None,
 ):
-    """Return one filtered page of sanitized server recovery issues."""
+    """Return one page of sanitized recovery and excluded-candidate issues."""
     _validate_state(state)
     scan = state.get("server_scan")
 
@@ -3697,6 +3993,9 @@ def coverage_issues_page(
 
     if normalized_code and FAILURE_REASON_RE.fullmatch(normalized_code) is None:
         raise HelperError("--code is not a valid stable failure code.")
+
+    if candidate_reason not in {None, *CANDIDATE_ISSUE_REASONS}:
+        raise HelperError("--candidate-reason is not a valid candidate exclusion reason.")
 
     if retryability not in {None, "retryable", "deterministic"}:
         raise HelperError("--retryability must be retryable or deterministic.")
@@ -3726,6 +4025,11 @@ def coverage_issues_page(
 
     bounded_limit = max(1, min(int(limit), 100))
     normalized_offset = max(int(offset), 0)
+    candidate_issues = [
+        issue
+        for issue in state["candidate_issues"]
+        if candidate_reason is None or issue["reason"] == candidate_reason
+    ]
     shown = issues[normalized_offset:normalized_offset + bounded_limit]
     remaining = max(len(issues) - normalized_offset - len(shown), 0)
     rv = {
@@ -3736,6 +4040,15 @@ def coverage_issues_page(
         "shown_count": len(shown),
         "remaining_issue_count": remaining,
         "issues": shown,
+        "candidate_issue_count": len(state["candidate_issues"]),
+        "matching_candidate_issue_count": len(candidate_issues),
+        "candidate_issues": candidate_issues[
+            normalized_offset:normalized_offset + bounded_limit
+        ],
+        "remaining_candidate_issue_count": max(
+            len(candidate_issues) - normalized_offset - bounded_limit,
+            0,
+        ),
     }
 
     return rv
@@ -3927,6 +4240,15 @@ def coverage_audit(state):
     failed = sorted(state["failed"])
     not_checked = sorted(state.get("server_not_checked") or {})
     incomplete = sorted(state.get("server_incomplete") or {})
+    ambiguous_candidate_issues = [
+        issue
+        for issue in state["candidate_issues"]
+        if issue["reason"] not in HARMLESS_CANDIDATE_ISSUE_REASONS
+    ]
+
+    if ambiguous_candidate_issues:
+        warnings.append("candidate_identity_limited")
+
     complete = (
         not inconsistencies
         and not unsearchable
@@ -3969,6 +4291,7 @@ def coverage_audit(state):
             else True
         )
         and unclassified_bundle_count == 0
+        and not ambiguous_candidate_issues
     )
     output = {
         "complete": complete,
@@ -3994,6 +4317,11 @@ def coverage_audit(state):
         ),
         "candidate_count": (
             state["server_scan"].get("candidate_count") if server_bound else None
+        ),
+        "candidate_issue_count": len(state["candidate_issues"]),
+        "ambiguous_candidate_issue_count": len(ambiguous_candidate_issues),
+        "harmless_candidate_issue_count": (
+            len(state["candidate_issues"]) - len(ambiguous_candidate_issues)
         ),
         "not_checked_filer_count": len(not_checked),
         "incomplete_filer_count": len(incomplete),
@@ -4413,6 +4741,9 @@ def _argument_parser():
     coverage_issues.add_argument("--offset", type=int, default=0)
     coverage_issues.add_argument("--code")
     coverage_issues.add_argument(
+        "--candidate-reason", choices=tuple(sorted(CANDIDATE_ISSUE_REASONS))
+    )
+    coverage_issues.add_argument(
         "--retryability",
         choices=("retryable", "deterministic"),
     )
@@ -4634,12 +4965,20 @@ def main(argv=None):
                 artifact_id,
                 eligible_results,
             )
+            main_result_count = (
+                len(state["server_scan"]["bundle_ids"])
+                if "bundle_ids" in state["server_scan"]
+                else len(eligible_results)
+            )
             output = {
                 "status": "recorded",
                 "request_binding": "server_bound",
                 "scan_id": state["server_scan"].get("scan_id"),
                 "result_count": bundle_count,
-                "eligible_result_count": len(eligible_results),
+                "provider_delivered_result_count": bundle_count,
+                "eligible_result_count": main_result_count,
+                "main_result_count": main_result_count,
+                "eligible_evidence_count": len(eligible_results),
                 "checked_filer_count": len(state["server_checked"]),
                 "candidate_filer_count": state["server_scan"].get(
                     "candidate_filer_count"
@@ -4656,6 +4995,13 @@ def main(argv=None):
                 ),
                 "sec_fts": state["server_scan"].get("sec_fts"),
                 "coverage_issues_available": True,
+                "candidate_issue_count": len(state["candidate_issues"]),
+                "excluded_candidate_issue_count": len(state["candidate_issues"]),
+                "candidate_issues": state["candidate_issues"][:DEFAULT_COVERAGE_ISSUES],
+                "remaining_candidate_issue_count": max(
+                    len(state["candidate_issues"]) - DEFAULT_COVERAGE_ISSUES,
+                    0,
+                ),
                 "recommended_follow_up": state["server_scan"].get(
                     "recommended_follow_up"
                 ),
@@ -4693,6 +5039,7 @@ def main(argv=None):
                 limit=arguments.limit,
                 offset=arguments.offset,
                 code=arguments.code,
+                candidate_reason=arguments.candidate_reason,
                 retryability=arguments.retryability,
                 attachment_format=arguments.attachment_format,
             )

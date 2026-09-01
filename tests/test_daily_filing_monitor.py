@@ -2684,6 +2684,230 @@ class ServerBoundCensusImportTests(unittest.TestCase):
         self.assertEqual(audit["server_checked_filer_count"], 1)
         self.assertEqual(audit["unpolled_filer_count"], 0)
 
+    def test_import_server_scan_discards_out_of_window_bundles(self):
+        """Ignore irrelevant delivered extras without weakening frozen-window coverage."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        evidence = _filing_result()
+        evidence.update({
+            "scan_cik": "0000789019",
+            "scan_source": "internal",
+            "companion": False,
+            "filing_date": "2026-08-04",
+        })
+        bundle_id = f"filing:{'e' * 24}"
+        bundle = {
+            "bundle_id": bundle_id,
+            "scan_cik": "0000789019",
+            "accession_number": "0000789019-26-000003",
+            "ticker": "MSFT.US",
+            "name": "Microsoft Corporation",
+            "filing_type": "8-K",
+            "filing_date": "2026-08-04",
+            "matched_query_indexes": [0],
+            "match_sources": ["internal"],
+            "evidence_count": 1,
+            "evidence": [evidence],
+        }
+        payload = _server_scan_payload(state, results=[bundle])
+        payload["schema_version"] = 2
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+            )
+
+        audit = FILING.coverage_audit(state)
+        self.assertEqual(eligible, [])
+        self.assertEqual(state["server_scan"]["bundle_ids"], [])
+        self.assertEqual(
+            state["server_scan"]["discarded_out_of_window_bundle_count"], 1
+        )
+        self.assertEqual(state["candidate_issues"], [{
+            "company": "Microsoft Corporation",
+            "company_identity": "provider_reported",
+            "ticker": "MSFT.US",
+            "cik": "0000789019",
+            "accession": "0000789019-26-000001",
+            "bundle_id": bundle_id,
+            "filing_type": "8-K",
+            "reason": "filing_date_outside_window",
+            "fields": ["filing_date"],
+            "reported_values": {"filing_date": "2026-08-04"},
+            "expected": "an ISO-8601 filing date within the requested window",
+            "disposition": "excluded_from_main_results",
+        }])
+        self.assertTrue(audit["complete"])
+        self.assertTrue(audit["comprehensive"])
+        self.assertEqual(audit["harmless_candidate_issue_count"], 1)
+        self.assertEqual(audit["ambiguous_candidate_issue_count"], 0)
+
+    def test_import_server_scan_reports_malformed_candidate_metadata(self):
+        """Exclude a bad candidate while retaining the completed filing-level audit."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        result = _filing_result()
+        result.update({
+            "scan_cik": "0000789019",
+            "scan_source": "internal",
+            "companion": False,
+            "filing_date": "not-a-date",
+        })
+        payload = _server_scan_payload(state, results=[result])
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+            )
+
+        audit = FILING.coverage_audit(state)
+        issue_page = FILING.coverage_issues_page(state)
+        filtered_issue_page = FILING.coverage_issues_page(
+            state,
+            candidate_reason="malformed_filing_date",
+        )
+        self.assertEqual(eligible, [])
+        self.assertTrue(audit["complete"])
+        self.assertTrue(audit["retrieval_complete"])
+        self.assertFalse(audit["comprehensive"])
+        self.assertFalse(audit["negative_findings_supported"])
+        self.assertEqual(audit["candidate_issue_count"], 1)
+        self.assertEqual(audit["ambiguous_candidate_issue_count"], 1)
+        self.assertIn("candidate_identity_limited", audit["warnings"])
+        self.assertEqual(issue_page["candidate_issues"], [{
+            "company": "Microsoft Corporation",
+            "company_identity": "provider_reported",
+            "ticker": "MSFT.US",
+            "cik": "0000789019",
+            "accession": "0000789019-26-000001",
+            "bundle_id": None,
+            "filing_type": "8-K",
+            "reason": "malformed_filing_date",
+            "fields": ["filing_date"],
+            "reported_values": {"filing_date": "not-a-date"},
+            "expected": "an ISO-8601 filing date within the requested window",
+            "disposition": "excluded_from_main_results",
+        }])
+        self.assertEqual(filtered_issue_page["matching_candidate_issue_count"], 1)
+        FILING.reset_searches(state)
+        self.assertEqual(state["candidate_issues"], [])
+
+    def test_in_scope_source_with_conflicting_scan_cik_blocks_no_match(self):
+        """A bad wrapper identity cannot hide a source mapped to the filing set."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        result = _filing_result()
+        result.update({
+            "scan_cik": "0000000002",
+            "scan_source": "internal",
+            "companion": False,
+        })
+        payload = _server_scan_payload(state, results=[result])
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+            )
+
+        audit = FILING.coverage_audit(state)
+        issue = state["candidate_issues"][0]
+        self.assertEqual(eligible, [])
+        self.assertFalse(audit["comprehensive"])
+        self.assertEqual(issue["reason"], "issuer_identity_conflict")
+        self.assertEqual(issue["reported_values"], {
+            "accession": "0000789019-26-000001",
+            "cik": "0000000002",
+        })
+
+    def test_missing_filing_type_is_reported_as_its_own_candidate_issue(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        result = _filing_result(filing_type="")
+        result.update({
+            "scan_cik": "0000789019",
+            "scan_source": "internal",
+            "companion": False,
+        })
+        payload = _server_scan_payload(state, results=[result])
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            FILING.import_server_scan(state, artifact_path, THEMATIC_QUERIES, 5)
+
+        issue = state["candidate_issues"][0]
+        self.assertEqual(issue["reason"], "malformed_filing_type")
+        self.assertEqual(issue["fields"], ["filing_type"])
+        self.assertEqual(issue["reported_values"], {"filing_type": "empty"})
+
+    def test_import_output_distinguishes_filing_bundles_from_evidence_chunks(self):
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        evidence = [
+            _filing_result(doc_uuid="doc-1", chunk_num=0),
+            _filing_result(doc_uuid="doc-1", chunk_num=1),
+        ]
+
+        for item in evidence:
+            item.update({
+                "scan_cik": "0000789019",
+                "scan_source": "internal",
+                "companion": False,
+            })
+
+        bundle = {
+            "bundle_id": f"filing:{'f' * 24}",
+            "scan_cik": "0000789019",
+            "accession_number": "0000789019-26-000001",
+            "ticker": "MSFT.US",
+            "name": "Microsoft Corporation",
+            "filing_type": "8-K",
+            "filing_date": "2026-08-06",
+            "matched_query_indexes": [0],
+            "match_sources": ["internal"],
+            "evidence_count": len(evidence),
+            "evidence": evidence,
+        }
+        payload = _server_scan_payload(state, results=[bundle])
+        payload["schema_version"] = 2
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_path = directory / "coverage.json"
+            artifact_path = directory / "scan.json"
+            FILING._write_state(state_path, state)
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with mock.patch("sys.stdout", stdout):
+                result = FILING.main([
+                    "coverage-import-scan",
+                    "--state", str(state_path),
+                    "--artifact", str(artifact_path),
+                    "--query", THEMATIC_QUERIES[0],
+                    "--query", THEMATIC_QUERIES[1],
+                    "--results-per-query", "5",
+                    "--mode", "thorough",
+                ])
+
+        output = json.loads(stdout.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(output["provider_delivered_result_count"], 1)
+        self.assertEqual(output["main_result_count"], 1)
+        self.assertEqual(output["eligible_result_count"], 1)
+        self.assertEqual(output["eligible_evidence_count"], 2)
+
+
     def test_import_server_empty_is_checked_not_failed(self):
         state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
         payload = _server_scan_payload(state, status="checked_empty")

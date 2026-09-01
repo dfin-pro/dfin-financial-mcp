@@ -83,10 +83,10 @@ python3 <skill-dir>/scripts/filing_artifact.py coverage-import-scan --state <cov
 
 Use the same selected mode in the request and import command. The helper validates the census fingerprint, exact query binding, mode-appropriate DFin and SEC source routes, exact-recovery accounting, bounded SEC full-text search diagnostics, result identities, `total_filers = checked + not_checked + failed + incomplete`, and result-delivery arithmetic. It records checked, not-checked, and incomplete outcomes separately and emits bounded eligible summaries. Page those summaries locally with `summarize --state <coverage-state-path> --artifact <scan-json-path> --offset <next offset>`; the `.summary-index.json` sidecar prevents reopening the full artifact.
 
-Use the bounded completion diagnostics for the ordinary report. Only when the user asks which filings were affected, page the sanitized issue records locally:
+Use the bounded completion diagnostics for the ordinary report. Candidate-level metadata or identity problems are retained as sanitized exclusion records rather than suppressing the scan: each names the available provider-reported company/ticker/CIK and the invalid fields, but never includes evidence text. If any occur, report the specific affected candidates separately from the main findings. Candidate issues caused by malformed or conflicting identity metadata block a definitive no-match conclusion; known out-of-window or out-of-scope extras do not. Page recovery and candidate exclusion records locally when more detail is needed:
 
 ```text
-python3 <skill-dir>/scripts/filing_artifact.py coverage-issues --state <coverage-state-path> [--code <failure-code>] [--retryability retryable|deterministic] [--format <extension-or-content-type>] [--offset <next offset>]
+python3 <skill-dir>/scripts/filing_artifact.py coverage-issues --state <coverage-state-path> [--code <failure-code>] [--candidate-reason <exclusion-reason>] [--retryability retryable|deterministic] [--format <extension-or-content-type>] [--offset <next offset>]
 ```
 
 6. Run the retrieval audit before enrichment:
@@ -106,7 +106,7 @@ Fast mode merges bounded candidate pools from DFin indexed filing text and SEC f
 - Exact recovery searches the primary filing and HTML exhibits selected from SEC Document Format Files. It never downloads Data Files such as XBRL ZIP/XML packages; use the bounded `recovery_scope` counts to explain which HTML and non-HTML rows were encountered without dumping filenames.
 - Use CIK plus SEC accession as the filing bundle identity; fall back to `doc_uuid` only when no accession exists.
 - Preserve every issuer association on joint accessions. Coverage bookkeeping does not automatically attribute an event to every co-filer.
-- Same-CIK companion accessions may be included and labeled. Results for CIKs outside the frozen census are excluded.
+- Same-CIK companion accessions may be included and labeled. Results for CIKs outside the frozen census, or whose valid filing date is outside the frozen window, are discarded before classification; those extras do not limit the in-window audit. Candidate-level malformed or conflicting metadata is excluded and reported as a specific candidate issue; only malformed receipt-level metadata remains an integrity failure.
 - Keep unresolved issuers under their CIK and skip ticker-based enrichment.
 
 ## 3. Classify bundles
@@ -172,6 +172,7 @@ Read `output_guidelines` before presenting substantive results.
 - For a complete uncapped fast scan, report: “The fast scan surfaced {candidate_result_count} candidate results across {candidate_company_count} companies. Across the selected dates and filing types, {eligible_filing_count} filings from {eligible_company_count} companies were eligible for review. The queries were applied collectively across that filing set, which is effective for identifying likely events but does not verify every filing individually. For a filing-by-filing, audited review, run the same window in thorough mode.” Use the direct response’s `scan_summary` fields for these values.
 - When fast `candidate_discovery_status` is `limited`, state that candidate retrieval reached a limit, so additional potentially relevant results may not be included, and recommend thorough mode. When it is `partial`, state that candidate discovery was incomplete; do not present the result as a clean scan or a no-match conclusion. Never report checked, not-checked, source-route, or local-index counts in a fast-mode user summary.
 - For thorough mode, report `scan_summary.audit_status`, selected forms, the eligible filing and company counts, and the most significant event. Read the saved artifact only when an audited limitation or filing-level investigation needs explanation.
+- Present candidate exclusion records separately from the main results, naming the provider-reported company (or ticker/CIK when no company name is available), the affected field or fields, and that the candidate was excluded. Do not collapse these into an unspecified warning. State the separate totals for provider-delivered results, eligible main results, and excluded candidates.
 - In text mode, present selected events in a Markdown table with these columns: Ticker, Company, Event, Price (Δ), 1Y, and Filing. Mark doubtful bundles `⚑ flagged`.
 - Say no relevant results were found only when `coverage-audit` reports `comprehensive: true`. A complete fast scan may report its observed matches, but it cannot support a no-match conclusion. Otherwise say no matches were surfaced by the bounded scan and name the limitation or unresolved issue.
 - Do not use “census” in investor-facing prose. Say “eligible filing set” or “eligible filings” instead. This does not prove perfect thematic recall for image-only content or unavailable exhibits.
