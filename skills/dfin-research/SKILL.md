@@ -20,6 +20,7 @@ Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")
 
 - Use API delivery for search results. If a returned artifact URL is blocked, follow the `methodology_search` fallback exactly; do not substitute inline delivery for other failures or convenience.
 - For `search_filings`, inspect `status`, `results_complete`, and `limitations` before drawing a coverage conclusion. A partial response contains usable surviving evidence but is not exhaustive; report the limitation and do not turn absent results into a no-match claim. With API delivery, these fields accompany the existing artifact reference and are repeated inside the downloaded artifact.
+- A date-scoped `search_filings` request may combine indexed DFin evidence with SEC filing evidence when its interval crosses reliable indexed coverage. Treat the response as one deduplicated search rather than reconciling the sources yourself. If `fiscal_scope_adjusted` is reported, explain that the SEC portion was searched by filing date without the supplied fiscal filter.
 - Load tool schemas with select:, never a broad keyword query — a keyword query with max_results ≥ tool count returns the entire server. Statements task → select:mcp__dfin__agent_help,mcp__dfin__get_financial_statements, mcp__dfin__get_financial_statement_options
     Add only if the question needs segments, KPIs, quarters, or quotes: select:mcp__dfin__search_filings,mcp__dfin__search_in_documents
 

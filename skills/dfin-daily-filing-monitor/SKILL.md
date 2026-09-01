@@ -5,7 +5,7 @@ description: Monitor the last one to three days of SEC filings for a named topic
 
 # Daily Filing Monitor
 
-DFin skill version: 0.1.9, updated 2026-08-27.
+DFin skill version: 0.1.9.1, updated 2026-09-01.
 
 Before the first DFin call, read `agent_help(topic="agent_guide")` once. Read `methodology_search` before discovery, `methodology_financials` before ratio enrichment. Read `methodology_delegation` before delegating any eligible downstream work.
 
