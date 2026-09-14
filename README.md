@@ -4,13 +4,14 @@
 
 Source-grounded company **SEC filings**, **financial statements**, **ratios**, **stock context**, **fund/ETF analytics**, **earnings transcripts**, **dfin.pro research reports**, and a **fundamentals stock screener** - brought into Claude Code, Cowork, OpenAI Codex, Hermes, and other AI agents through the **dfin.pro Model Context Protocol (MCP)** server.
 
-[dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships four skills that guide agents through research, screening, note capture, and filing monitoring.
+[dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships five skills that guide agents through research, screening, semantic screening, note capture, and filing monitoring.
 
 ## What you get
 
 - **dfin.pro MCP tools** over the public dfin.pro MCP server: filing search, transcript search, report search, securities lookup, a fundamentals stock screener, annual financial statements, financial ratios, stock context, and fund/ETF analytics.
 - **The `dfin-research` skill** - handles source-grounded public-company, security, peer, earnings, statement, ratio, filing, transcript, report, price, and fund research.
 - **The `dfin-screener` skill** - builds and runs contract-backed stock screens across financial, valuation, growth, technical, and other supported criteria.
+- **The `dfin-semantic-screener` skill** - runs a quantitative screen and then searches filing or transcript evidence across up to 100 selected stocks.
 - **The `dfin-note` skill** - saves completed financial research or material news as structured private notes with research or news categories and source relationships.
 - **The `dfin-daily-filing-monitor` skill** - scans recent SEC filings for a requested theme or corporate event and presents an enriched briefing or dashboard.
 - **Codex and Claude packaging** - both plugin formats bundle the OAuth-enabled MCP connection, alongside agent-facing docs links.

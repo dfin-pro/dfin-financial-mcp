@@ -1,0 +1,8 @@
+interface:
+  display_name: "DFin Semantic Screener"
+  short_description: "Screen stocks, then search document evidence"
+  brand_color: "#2563EB"
+  default_prompt: "Use $dfin-semantic-screener to screen stocks quantitatively and then search filings or transcripts for supporting evidence."
+
+policy:
+  allow_implicit_invocation: true
