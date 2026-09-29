@@ -2,7 +2,7 @@
 
 > Ask. Analyze. Alpha.
 
-Source-grounded company **SEC filings**, **financial statements**, **ratios**, **stock context**, **fund/ETF analytics**, **earnings transcripts**, **dfin.pro research reports**, and a **fundamentals stock screener** - brought into Claude Code, Cowork, OpenAI Codex, Hermes, and other AI agents through the **dfin.pro Model Context Protocol (MCP)** server.
+Source-grounded company **SEC filings**, **financial statements**, **ratios**, **stock context**, **fund/ETF analytics**, **earnings transcripts**, **dfin.pro research reports**, and a **fundamentals stock screener** - brought into Claude, Claude Code, OpenAI Codex, ChatGPT, Hermes, and other AI agents through the **dfin.pro Model Context Protocol (MCP)** server.
 
 [dfin.pro](https://www.dfin.pro) turns company filings and earnings transcripts into verifiable, source-grounded research for serious investors. This plugin connects that data to your agentic workflow and ships five skills that guide agents through research, screening, semantic screening, note capture, and filing monitoring.
 
@@ -20,14 +20,20 @@ Source-grounded company **SEC filings**, **financial statements**, **ratios**, *
 
 ### 1. Create your account
 
-Create an account at **[dfin.pro](https://www.dfin.pro)**. During early access, OAuth connections are available to approved trial accounts and accounts that already have a usable API key. The bundled MCP connection uses the canonical `https://www.dfin.pro/mcp` endpoint and discovers dfin.pro's OAuth configuration automatically. Eligible accounts do not need to paste an API key or configure an environment variable for the plugin flow.
+Create and verify an account at **[dfin.pro](https://www.dfin.pro)**. The bundled MCP connection uses the canonical `https://www.dfin.pro/mcp` endpoint and discovers dfin.pro's OAuth configuration automatically, so an eligible account does not need to paste an API key or configure an environment variable for the plugin flow. Existing API-key integrations remain supported.
+
+Every account receives 250 free core REST and MCP data requests per UTC calendar month before its existing paid or operator access rules apply. Help, discovery guidance, securities lookup, and the balance tool do not consume that allowance. The allowance and rate limits are shared across REST requests, API keys, and OAuth clients. Call `get_credit_balance` after connecting to inspect the account's MCP billing mode, available DFin credits, standard call price, Notebook access, and account-shared rate limits. When PAYG is enabled, Notebook tools require an active Base or higher research subscription. When PAYG is disabled, existing Notebook access and quota behavior continue. Notebook tools never consume credits. After the free allowance, accepted PAYG data results use the standard call price returned by `get_credit_balance`. Operator MCP inclusion waives MCP charges only; it does not cover REST charges. Research subscriptions do not waive ordinary core PAYG charges. Polls and failed attempts create no additional charge. A pending response may follow an uncertain committed charge, and a failed response may follow previously charged partial output; inspect the balance and reconcile before retrying. Identical successful requests replay without another allowance request or charge during the configured replay window, which defaults to 90 seconds from completion and does not extend on retry. Polling the same processing task returns fresh progress and counts as one request over that task generation. Accepted partial evidence can be charged once; later recovery or full results from the same task do not create another charge.
 
 For the installation and connection steps, follow the example for your tool or AI:
 
 - [OpenAI Codex](https://www.dfin.pro/docs/examples/codex-dfin-mcp/)
 - [Claude Code](https://www.dfin.pro/docs/examples/claude-code-dfin-mcp/)
-- [Claude.ai or Cowork](https://www.dfin.pro/docs/examples/claude-dfin-mcp/)
+- [Claude](https://www.dfin.pro/docs/examples/claude-dfin-mcp/)
+- [ChatGPT](https://www.dfin.pro/agents.md#chatgpt)
+- [Hermes](https://www.dfin.pro/agents.md#hermes)
 - [Grok](https://www.dfin.pro/docs/examples/grok-dfin-mcp/)
+
+For Claude, Claude Code, and Codex, copy the setup prompt near the beginning of the relevant guide. ChatGPT and Hermes use their client sections in the public [setup workflow](https://www.dfin.pro/agents.md). The workflow inspects the existing installation, installs only missing components where supported, guides browser authorization, and verifies the selected research skills and a live MCP result. ChatGPT uses the same repository plugin on supported desktop installations or permitted direct OAuth on the web; Hermes uses direct OAuth with the five DFin skills installed separately. The guides include independent manual steps, and the workflow and guides include fresh-session continuation prompts.
 
 ## Documentation
 
