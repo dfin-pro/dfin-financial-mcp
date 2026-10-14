@@ -12,7 +12,9 @@ Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")
 
 ## Plan the work
 
-- Use `search_reports` and `search_notes` early to surface relevant prior insights before gathering new evidence.
+- Always use `search_notes` to find and review existing notes relevant to the user’s query; if no relevant notes are returned or access is unavailable, continue with the user’s requested task.
+- When a relevant note is found, use `find_linked_notes` from the strongest match with the user’s query and `max_hops=2` to discover other potentially relevant notes, without recursively expanding results.
+- Use `search_reports` early to surface relevant prior insights before gathering new evidence.
 - Before each filing-search call, name every filter and its reason: ticker scope · filing_type · fiscal_year · fiscal_period · date bounds · searchtype. Leaving an optional filter empty is a decision. State it.
 - For substantial repetitive data gathering or processing that can be divided into independent, mechanically verifiable batches, consider task delegation to subagents. Read `agent_help(topic="methodology_delegation")` before proceeding. Delegate only if every mandatory requirement passes; otherwise keep the work in the primary agent.
 
