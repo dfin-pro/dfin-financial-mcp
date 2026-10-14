@@ -32,14 +32,14 @@ Run `run_screener` with `delivery="api"`, a stable user-directed sort, `result_f
 
 Add source coverage to the quantitative filters:
 
-- **Filings only:** use `databaseCoverage={"relation":"or","values":["filings"]}`. Retain ADRs and validate that every selected ticker ends in `.US` before filing search.
+- **Filings only:** use `databaseCoverage={"relation":"or","values":["filings"]}`. Retain only exchange-qualified tickers accepted by the live filing-search schema.
 - **Transcripts only:** use `databaseCoverage={"relation":"or","values":["transcripts"]}`. Accept globally exchange-qualified tickers.
-- **Either filings or transcripts:** use `databaseCoverage={"relation":"or","values":["filings","transcripts"]}`. Because filing search is included, retain only `.US` tickers.
-- **Both filings and transcripts:** use `databaseCoverage={"relation":"and","values":["filings","transcripts"]}`. Retain only `.US` tickers.
+- **Either filings or transcripts:** use `databaseCoverage={"relation":"or","values":["filings","transcripts"]}`. Because filing search is included, retain only exchange-qualified tickers accepted by the live filing-search schema.
+- **Both filings and transcripts:** use `databaseCoverage={"relation":"and","values":["filings","transcripts"]}`. Retain only exchange-qualified tickers accepted by the live filing-search schema.
 
 The live coverage contract is positive-only: use `relation` with `values`, not the former `operator` shape or a negative-coverage condition. `or` means any selected coverage and is the default relation; `and` means every selected coverage.
 
-For the combined-source case, continue explicit pages with unchanged filters and sort until the candidate search budget of distinct `.US` tickers has been collected or the screen is exhausted. Never substitute country of domicile for US listing; doing so would exclude eligible ADRs.
+For the combined-source case, continue explicit pages with unchanged filters and sort until the candidate search budget of distinct filing-search-eligible tickers has been collected or the screen is exhausted. Never substitute country of domicile for listing exchange; retain eligible ADRs and other supported listings according to their exchange-qualified tickers.
 
 Describe the resulting universe as quantitatively qualified securities with indexed source coverage. The coverage flag means some documents are indexed; it does not guarantee coverage inside the requested date, fiscal-period, or filing-type filters.
 
@@ -71,7 +71,7 @@ Inspect every response before interpreting it:
 
 Keep artifact capability URLs private. Save artifacts temporarily without printing them into context, and load only selected evidence. If artifact access is blocked, follow `methodology_search`; do not choose inline delivery merely for convenience.
 
-Bulk filing search is indexed-only. Offer single-company `search_filings` follow-up for material coverage gaps, but do not automatically launch many SEC fallback searches unless the user explicitly requests comprehensive coverage. Missing transcripts are not retrieved on demand; broaden appropriate filters or inspect available transcript coverage instead.
+Bulk filing search is indexed-only. For `.US` companies, offer single-company `search_filings` follow-up for material coverage gaps, but do not automatically launch many SEC fallback searches unless the user explicitly requests comprehensive coverage. Non-US filing search and transcript search do not retrieve missing documents on demand; broaden appropriate filters or inspect available coverage instead.
 
 ## Evaluate and present results
 

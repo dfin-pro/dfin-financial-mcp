@@ -1857,6 +1857,151 @@ class FilingArtifactTests(unittest.TestCase):
         self.assertEqual(state["filers"]["0000789019"]["search_ticker"], "MSFT.US")
         self.assertTrue(FILING.coverage_audit(state)["complete"])
 
+    def test_versioned_bundle_expands_evidence_without_changing_outer_count(self):
+        evidence = [
+            _filing_result(doc_uuid="doc-1", chunk_num=0),
+            _filing_result(doc_uuid="doc-1", chunk_num=1),
+        ]
+        bundle_id = f"filing:{'b' * 24}"
+        bundle = {
+            "bundle_id": bundle_id,
+            "scan_cik": "0000789019",
+            "accession_number": "0000789019-26-000001",
+            "ticker": "MSFT.US",
+            "name": "Microsoft Corporation",
+            "filing_type": "8-K",
+            "filing_date": "2026-08-06",
+            "matched_query_indexes": [0],
+            "match_sources": ["internal"],
+            "evidence_count": len(evidence),
+            "evidence": evidence,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "versioned-bundle.json"
+            artifact.write_text(
+                json.dumps({
+                    "schema_version": 2,
+                    "count": 1,
+                    "results": [bundle],
+                }),
+                encoding="utf-8",
+            )
+            results, count, _response_id_value, _artifact_id = (
+                FILING.load_search_response(artifact)
+            )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [result["_filing_bundle_id"] for result in results],
+            [bundle_id, bundle_id],
+        )
+
+    def test_versioned_bundle_contract_rejects_invalid_shapes(self):
+        evidence = _filing_result()
+        valid_bundle = {
+            "bundle_id": f"filing:{'c' * 24}",
+            "scan_cik": "0000789019",
+            "accession_number": "0000789019-26-000001",
+            "ticker": "MSFT.US",
+            "filing_type": "8-K",
+            "filing_date": "2026-08-06",
+            "matched_query_indexes": [0],
+            "match_sources": ["internal"],
+            "evidence_count": 1,
+            "evidence": [evidence],
+        }
+        invalid_payloads = [
+            {"schema_version": 2, "count": 1, "results": [evidence]},
+            {
+                "schema_version": 2,
+                "count": 1,
+                "results": [{**valid_bundle, "evidence_count": 2}],
+            },
+            {
+                "schema_version": 2,
+                "count": 1,
+                "results": [{**valid_bundle, "evidence_count": 0, "evidence": []}],
+            },
+            {
+                "schema_version": 2,
+                "count": 1,
+                "results": [{**valid_bundle, "evidence_count": True}],
+            },
+            {
+                "schema_version": 2,
+                "count": 1,
+                "results": [{**valid_bundle, "evidence_count": 1.0}],
+            },
+            {"schema_version": 3, "count": 1, "results": [valid_bundle]},
+            {"schema_version": 2.0, "count": 1, "results": [valid_bundle]},
+            {"schema_version": 2, "count": 0},
+            {"schema_version": 2, "results": []},
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            for index, payload in enumerate(invalid_payloads):
+                with self.subTest(index=index):
+                    artifact = Path(directory) / f"invalid-{index}.json"
+                    artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+                    with self.assertRaises(FILING.HelperError):
+                        FILING.load_search_response(artifact)
+
+    def test_versioned_empty_artifact_is_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "versioned-empty.json"
+            artifact.write_text(
+                json.dumps({"schema_version": 2, "count": 0, "results": []}),
+                encoding="utf-8",
+            )
+            results, count, _response_id_value, _artifact_id = (
+                FILING.load_search_response(artifact)
+            )
+
+        self.assertEqual(count, 0)
+        self.assertEqual(results, [])
+
+    def test_unversioned_bundle_and_flat_result_remain_supported(self):
+        evidence = _filing_result()
+        bundle_id = f"filing:{'d' * 24}"
+        bundle = {
+            "bundle_id": bundle_id,
+            "scan_cik": "0000789019",
+            "accession_number": "0000789019-26-000001",
+            "ticker": "MSFT.US",
+            "filing_type": "8-K",
+            "filing_date": "2026-08-06",
+            "matched_query_indexes": [0],
+            "match_sources": ["internal"],
+            "evidence_count": 1,
+            "evidence": [evidence],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            flat_path = Path(directory) / "legacy-flat.json"
+            bundle_path = Path(directory) / "transitional-bundle.json"
+            flat_path.write_text(
+                json.dumps({"count": 1, "results": [evidence]}),
+                encoding="utf-8",
+            )
+            bundle_path.write_text(
+                json.dumps({"count": 1, "results": [bundle]}),
+                encoding="utf-8",
+            )
+            flat_results, flat_count, _flat_response_id, _flat_artifact_id = (
+                FILING.load_search_response(flat_path)
+            )
+            bundle_results, bundle_count, _bundle_response_id, _bundle_artifact_id = (
+                FILING.load_search_response(bundle_path)
+            )
+
+        self.assertEqual(flat_count, 1)
+        self.assertEqual(flat_results, [evidence])
+        self.assertEqual(bundle_count, 1)
+        self.assertEqual(bundle_results[0]["_filing_bundle_id"], bundle_id)
+
     def test_search_receipts_reject_malformed_counts_and_query_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             malformed = Path(directory) / "malformed.json"
@@ -2907,6 +3052,69 @@ class ServerBoundCensusImportTests(unittest.TestCase):
         self.assertEqual(output["eligible_result_count"], 1)
         self.assertEqual(output["eligible_evidence_count"], 2)
 
+    def test_server_filing_bundle_requires_scan_bound_agent_classification(self):
+        """Separate complete retrieval from a comprehensive topic conclusion."""
+        state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
+        evidence = _filing_result()
+        evidence.update({
+            "scan_cik": "0000789019",
+            "scan_source": "internal",
+            "companion": False,
+        })
+        bundle_id = f"filing:{'b' * 24}"
+        bundle = {
+            "bundle_id": bundle_id,
+            "scan_cik": "0000789019",
+            "accession_number": "0000789019-26-000002",
+            "ticker": "MSFT.US",
+            "name": "Microsoft Corporation",
+            "filing_type": "8-K",
+            "filing_date": "2026-08-06",
+            "matched_query_indexes": [0],
+            "match_sources": ["internal"],
+            "evidence_count": 1,
+            "evidence": [evidence],
+        }
+        payload = _server_scan_payload(state, results=[bundle])
+        payload["schema_version"] = 2
+        payload["coverage"].update({
+            "negative_findings_supported": False,
+            "classification_required": True,
+            "retrieval_complete": True,
+            "comprehensive": False,
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "scan.json"
+            artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+            eligible = FILING.import_server_scan(
+                state,
+                artifact_path,
+                THEMATIC_QUERIES,
+                5,
+            )
+
+        before = FILING.coverage_audit(state)
+        classification = FILING.classify_filing_bundles(
+            state,
+            [bundle_id],
+            "confirmed",
+        )
+        after = FILING.coverage_audit(state)
+
+        self.assertEqual(len(eligible), 1)
+        self.assertEqual(state["server_scan"]["bundle_ids"], [bundle_id])
+        self.assertTrue(before["complete"])
+        self.assertTrue(before["retrieval_complete"])
+        self.assertFalse(before["comprehensive"])
+        self.assertEqual(before["unclassified_bundle_count"], 1)
+        self.assertEqual(classification["scan_id"], "a" * 32)
+        self.assertEqual(state["bundle_classifications"][bundle_id], {
+            "scan_id": "a" * 32,
+            "status": "confirmed",
+        })
+        self.assertTrue(after["comprehensive"])
+        self.assertTrue(after["negative_findings_supported"])
 
     def test_import_server_empty_is_checked_not_failed(self):
         state = FILING._enumeration_state(_enumeration_payload(), ["8-K"])
