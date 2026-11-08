@@ -1,62 +1,46 @@
 ---
 name: dfin-research
 description: >-
-  Research public companies, stocks, ETFs, and funds with dfin.pro's source-grounded financial data. Use for company or peer analysis, earnings research, statements and ratios, filing, transcript, or report evidence, prices, stock screening, fund analytics, or other evidence-backed public-equity work.
+  Research public companies, stocks, ETFs, and funds with dfin.pro's source-grounded financial data. Use for company or peer analysis, earnings research, statements and ratios, filing, transcript, or report evidence, prices, fund analytics, or other evidence-backed public-equity work.
 ---
 
 # dfin.pro Research
 
-DFin skill version: 0.1.9, updated 2026-08-27.
+DFin skill version: 0.2.0, updated 2026-11-08.
 
-Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read. It holds the current rules for tools, retries, and efficiency, and lists the focused topics to load for each kind of work. If this skill and the guide differ, follow the guide.
 
 ## Plan the work
 
-- Always use `search_notes` to find and review existing notes relevant to the user’s query; if no relevant notes are returned or access is unavailable, continue with the user’s requested task.
-- When a relevant note is found, use `find_linked_notes` from the strongest match with the user’s query and `max_hops=2` to discover other potentially relevant notes, without recursively expanding results.
-- Use `search_reports` early to surface relevant prior insights before gathering new evidence.
-- Before each filing-search call, name every filter and its reason: ticker scope · filing_type · fiscal_year · fiscal_period · date bounds · searchtype. Leaving an optional filter empty is a decision. State it.
-- For substantial repetitive data gathering or processing that can be divided into independent, mechanically verifiable batches, consider task delegation to subagents. Read `agent_help(topic="methodology_delegation")` before proceeding. Delegate only if every mandatory requirement passes; otherwise keep the work in the primary agent.
-
-## Token efficiency
-
-- Follow returned polling delays and repeat the same task inputs or continuation state while processing. Polls count once for the task, and later full results do not create another charge after accepted partial evidence. Keep changed research inputs as a separate request; consult the live tool response and `agent_help` for current retry rules.
-- Use API delivery for search results. If a returned artifact URL is blocked, follow the `methodology_search` fallback exactly; do not substitute inline delivery for other failures or convenience.
-- For `search_filings`, inspect `status`, `results_complete`, and `limitations` before drawing a coverage conclusion. A partial response contains usable surviving evidence but is not exhaustive; report the limitation and do not turn absent results into a no-match claim. With API delivery, these fields accompany the existing artifact reference and are repeated inside the downloaded artifact.
-- To find filings, transcripts, or reports where other issuers literally mention a company, use `searchtype="keyword"`, search the company name or a quoted multiword phrase, and pass that company's exchange-qualified ticker in `exclude_tickers`. The filter removes matching issuer documents without removing the same ticker or company name from the query text.
-- Treat global searches with `exclude_tickers` as ranked discovery. Results are bounded document chunks, several chunks can come from one issuer, and absent results do not establish that no other issuer contains the term. Hybrid and vector searches remain approximate and may return fewer results after exclusion.
-- An eligible date-scoped `.US` `search_filings` request may combine indexed DFin evidence with SEC filing evidence when its interval crosses reliable indexed coverage. Treat the response as one deduplicated search rather than reconciling the sources yourself. Non-US filing searches are indexed-only. If `fiscal_scope_adjusted` is reported, explain that the SEC portion was searched by filing date without the supplied fiscal filter.
-- For ticker-scoped insider evidence, `search_filings` supports Forms 3, 4, 5, and 144, including amendments. Use an exchange-qualified `.US` ticker; Form 144 is a notice of a proposed sale, not evidence that a sale completed.
-- Use `bulk_search_filings` for one semantic search across a selected set of companies whose exchange-qualified tickers match its live schema. Choose `by_ticker` when every company needs its own ranked evidence and coverage signal; choose `by_query` when the goal is the strongest evidence across the combined set. Bulk search is indexed-only. For a `.US` ticker with missing indexed coverage, call `search_filings` with the same queries and filters to check additional SEC coverage. Non-US filing searches remain indexed-only.
-- With API delivery, `bulk_search_filings` returns a compact count-and-coverage summary while its artifact contains the complete matches and chunks. Inspect `status` and `failures` before treating the artifact as exhaustive; a completed empty query is a valid no-match result, while a partial query is not.
-- Use `bulk_search_transcripts` for one indexed semantic search across two to 25 globally exchange-qualified tickers. Choose `by_ticker` for independent company rankings and transcript coverage counts, or `by_query` for the strongest evidence across the combined set. Transcript dates are event dates; the tool does not retrieve missing transcripts on demand.
-- With API delivery, `bulk_search_transcripts` follows the same compact-summary and artifact pattern as bulk filing search. Treat empty indexed coverage separately from a completed query with no semantic matches, and inspect `status` and `failures` before making an exhaustive claim.
-- Load tool schemas with select:, never a broad keyword query — a keyword query with max_results ≥ tool count returns the entire server. Statements task → select:mcp__dfin__agent_help,mcp__dfin__get_financial_statements. Read `agent_help(topic="methodology_financials")` for the current standardized field and bundle catalog. Statement retrieval defaults to independent as-reported filing packages; specify `source="standardized"` when standardized fields or a bundle is needed. Use `year` for an exact fiscal year or `duration` for latest annual periods.
-    Add only if the question needs segments, KPIs, quarters, or quotes: select:mcp__dfin__search_filings,mcp__dfin__search_in_documents
+1. Check prior work. Use `search_notes` to find notes relevant to the question. If one is relevant, call `find_linked_notes` on the strongest match with the default `max_hops=2`, and re-seed at most twice from a result that opens a distinct, relevant branch. This read-only check doesn't need `methodology_notes`. Use `search_reports` for relevant prior insights. If nothing relevant returns or access is unavailable, continue.
+2. Decide which evidence the question needs: structured data (statements, ratios, prices), source documents (filings, transcripts, reports), or both.
+3. For large, repetitive work that splits into independent, mechanically checkable batches, read `agent_help(topic="methodology_delegation")` and delegate only if every requirement passes.
 
 ## Workflow patterns
 
-- **Company analysis:** Use `get_stock_context` when the requested overview is broad or multi-part → retrieve the structured data and source evidence needed for the question → synthesize. Compact returns are the default. Request the optional return-distribution analysis only when it is material to the question, include returns, and use API delivery because the result is structured data.
-- **Peer comparison:** Establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions. Remember to incorporate any differences in periods, accounting basis, scope, currency, and units in the analysis work.
-- **Quant-to-semantic screen:** Run the quantitative screen → divide the survivors into bounded ticker sets → call `bulk_search_filings` or `bulk_search_transcripts` with `by_ticker` for company-level evidence or `by_query` for cross-universe discovery → inspect promising chunks and source documents more deeply → report missing or partial indexed coverage separately from a true no-match result.
-- **Filing, transcript, or report question:** Use the relevant discovery or evidence-search workflow → deepen the search within selected documents when necessary. Stock context is optional.
-- **Multi-year document evidence:** Use one fiscal-year list when the goal is the strongest evidence across the selected years. Use separate year-scoped searches when the answer must represent every year, because multi-year search ranks all selected years together under one result allowance.
-- **Table inspection:** follow `agent_help(topic="methodology_search")` and execute the bundled `scripts/extract_table_context.py`, resolving it relative to this `SKILL.md`.
-- **Image-derived evidence:** Follow the image-verification guidance in `agent_help(topic="methodology_search")` before relying on image-derived filing data.
+- **Company analysis:** Use `get_stock_context` when the overview is broad or multi-part → retrieve the structured data and source evidence the question needs → synthesize.
+- **Peer comparison:** Establish the comparison set → retrieve comparable structured data in parallel → gather issuer-specific source evidence → compare and rank only on supported dimensions, adjusting for differences in period, accounting basis, scope, currency, and units.
+- **Filing, transcript, or report question:** Find relevant documents with the search tools or `list_latest_filings`, `list_latest_transcripts`, or `list_latest_reports` → use `search_in_documents` to search inside selected documents when needed. When the answer must cover every year or period, run a separate search for each; a single multi-year search ranks all years together and can leave some unrepresented. Stock context is optional.
+- **Mentions by other companies:** Search filings, transcripts, or reports with no `ticker`, query the subject company's name, and put its ticker in `exclude_tickers`. Treat the results as ranked discovery, not a complete list. `methodology_search` explains the search settings.
+- **Stock screens:** For a quantitative screen, use the `dfin-screener` skill. For a screen followed by filing or transcript evidence, use the `dfin-semantic-screener` skill. If neither skill is available, read `agent_help(topic="methodology_screening")` before screening.
+- **Filing revisions:** Call `compare_filings` in `discover` mode to choose two filings, then in `compare` mode for that pair. Read the returned warnings before calling missing text a deletion, and share `comparison_url` when returned.
+- **Missing prepared statements:** Keep any statements `get_financial_statements` returned, then follow `agent_help(topic="methodology_financials")` to decide whether filings can supply the missing periods. An unfinished check is not confirmed absence.
+- **Table evidence:** Before reading any table's body, run the bundled `scripts/extract_table_context.py` (resolve it relative to this `SKILL.md`) to choose the table. `methodology_search` explains when and how.
+- **Image-derived evidence:** Filing content can include data extracted from images, shown in Markdown image syntax. Verify it as `methodology_search` directs before relying on it.
 
 ## Analysis and presentation
 
-- Perform calculations and data analysis programmatically and reproducibly, using Python with pandas and NumPy. For large datasets, use Polars and Parquet where available. Do not create or rely on spreadsheet files for analysis unless the user explicitly requests one.
+- Perform calculations programmatically and reproducibly in Python with pandas and NumPy; use Polars and Parquet for large datasets where available. Do not use spreadsheet files for analysis unless the user asks for one.
+- Before drafting an answer that uses DFin evidence, read `agent_help(topic="citations")` once and cite as it directs.
 
-### Simple Analytical Work
+### Simple analytical work
 
-- Lead with the direct answer or conclusion, then support it with retrieved evidence, calculations, analysis, and citations.
+- Lead with the direct answer, then support it with evidence, calculations, and citations.
 - Write for a professional investor in clear, natural, concise language. Match depth to the question without reducing the answer to clipped fragments.
-- Accuracy and faithful representation of the evidence come first. Include material caveats and uncertainty, but omit repetition, routine background, and process narration.
-- Distinguish reported facts, management claims, calculations, and inference. Use consistent inputs, show material formulas, and label calculated results.
-- Use comparable benchmarks and explain the financial mechanism, material counterevidence, and what would change the conclusion when relevant.
-- Use tables, charts, images, or diagrams when they communicate comparative, chronological, quantitative, or structural information more efficiently than prose. Label periods, units, currency, scope, and basis as applicable.
+- Accuracy and faithful representation of the evidence come first. Include material caveats; omit repetition, routine background, and process narration.
+- Distinguish reported facts, management claims, calculations, and inference. Show material formulas and label calculated results.
+- Use tables or charts when they communicate comparative, chronological, or quantitative information better than prose. Label periods, units, currency, scope, and basis.
 
-### Complex Analytical Work
+### Complex analytical work
 
-For presenting substantive or complex research analysis, read `agent_help(topic="output_guidelines")` once if it has not already been read. Complex work includes multi-source synthesis, material calculations or reconciliations, peer comparisons, thesis or valuation judgments, or output needing substantial tables or charts. The additional guidance is approximately 1,600 tokens and is intentionally unnecessary for simpler work.
+For multi-source synthesis, material calculations or reconciliations, peer comparisons, thesis or valuation judgments, or output needing substantial tables or charts, read `agent_help(topic="output_guidelines")` once before drafting. It is about 1,600 tokens and unnecessary for simpler work.

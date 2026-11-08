@@ -3,32 +3,20 @@ name: dfin-screener
 description: Build and run dfin.pro stock screens. Use when the user wants to find, filter, sort, or rank public companies using financial, valuation, growth, technical, or other screener criteria.
 ---
 
-DFin skill version: 0.1.9, updated 2026-08-27.
+DFin skill version: 0.2.0, updated 2026-11-08.
 
-Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read.
+Before the first DFin tool call in a task, read `agent_help(topic="agent_guide")` once if it has not already been read. Before building the first screen, read `agent_help(topic="methodology_screening")`; it holds the current rules for contract discovery, output size, and pagination. If this skill and the guides differ, follow the guides.
 
-## Screener workflow
+## Workflow
 
-Read the screener methodology before building screens. Examples show patterns; the live screener contract is authoritative.
-
-1. Read `agent_help(topic="methodology_screening")` after the agent guide and before constructing the first screen in a task.
-2. Call `get_screener_options(mode="basic", detail="index")` to discover canonical filters without loading full definitions.
-3. If the needed key is absent, or the task needs growth, historical metric rules, CAGR/multiple rules, composite metrics, volatility rule groups, or broader public filters, call `get_screener_options(mode="all", detail="index")`.
-4. Call `get_screener_options(mode=..., detail="full", filter_keys=[...])` with only the exact filters needed. Request no more than 20 unique keys per call.
-6. Build `filters`, `sort`, `fields`, `page`, and `result_format` only from the returned contract. Execute with `run_screener(..., delivery="api")`.
-7. Search results also return a `web_browser_access_url`, a separate 60-minute browser handoff link for the user. Provide a hyperlink (for example, `[Open this screen](...)`) to the user so they can pick up this screen in the browser for further investigation, if needed. 
-
-Use `delivery="inline"` only for a deliberately bounded page when artifact access is unavailable. Never silently relax filters, convert missing values to zero, or imply that a preview or single page is the complete match set. Treat results as candidates and verify selected securities before making investment claims.
-
-## Token efficiency
-
-- Prefer index discovery followed by focused full definitions. Use the compatibility full response without `filter_keys` only for genuinely broad contract inspection.
-- Reuse contract definitions already retrieved in the task.
-- Request only needed row fields, or tickers when downstream research does not need screener values.
-- Compare `total`, `count`, `limit`, and `offset` before describing completeness. Do not auto-paginate.
+1. Turn the request into criteria: universe (exchange, country, sector), size, metrics with their periods and thresholds, sort order, and how many results the user wants. If the user asks for a "top N" without saying how to rank, ask which metric to rank by.
+2. Discover the screener contract with `get_screener_options`: start with the compact index and load full definitions only for the filters you will use.
+3. Build filters, sort, and fields only from the returned definitions, then call `run_screener`.
+4. Present the criteria used, total matches versus rows shown, the candidate rows, and the link to open the screen in the browser. Treat matches as candidates, not recommendations.
 
 ## Common requests
 
-You don't need to re-run search_securities or get_stock_context for a company you already resolved or fetched context for earlier.
-
-- **Screen for candidates:** basic index -> all index if needed -> focused full definitions -> `run_screener(..., delivery="api")`. Research selected companies only when requested.
+- **Find candidates:** follow the workflow. Research individual companies only when the user asks.
+- **Refine a screen:** change only the criteria the user named, keep the other filters and sort unchanged, and say what changed.
+- **Screen, then research selected companies:** run the screen, then use the `dfin-research` skill for the companies chosen.
+- **Screen, then find filing or transcript evidence:** use the `dfin-semantic-screener` skill instead.
